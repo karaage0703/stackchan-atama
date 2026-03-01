@@ -23,6 +23,8 @@ import json
 import re
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 
 import requests
 import serial
@@ -32,6 +34,7 @@ DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 921600
 DEFAULT_VOICEVOX_URL = "http://127.0.0.1:50021"
 DEFAULT_VOICEVOX_SPEAKER = 1  # ずんだもん（あまあま）
+DEFAULT_SAMPLE_RATE = 16000  # 16kHz (M5Stackスピーカーには十分)
 
 
 # ---- Serial communication ----
@@ -111,11 +114,13 @@ class StackchanSerial:
 
 
 # ---- VOICEVOX ----
-def voicevox_synthesize(text, voicevox_url=DEFAULT_VOICEVOX_URL, speaker=DEFAULT_VOICEVOX_SPEAKER):
+def voicevox_synthesize(text, voicevox_url=DEFAULT_VOICEVOX_URL, speaker=DEFAULT_VOICEVOX_SPEAKER, sample_rate=DEFAULT_SAMPLE_RATE):
     """Generate WAV from text using VOICEVOX"""
     resp = requests.post(f"{voicevox_url}/audio_query", params={"text": text, "speaker": speaker})
     resp.raise_for_status()
     query = resp.json()
+    if sample_rate:
+        query["outputSamplingRate"] = sample_rate
 
     resp = requests.post(f"{voicevox_url}/synthesis", params={"speaker": speaker}, json=query)
     resp.raise_for_status()
@@ -139,16 +144,32 @@ def cmd_say(args):
     if args.pipeline:
         chunks = split_text(args.text)
         print(f"Pipeline: {len(chunks)} chunks", file=sys.stderr)
-        for i, chunk in enumerate(chunks):
-            t0 = time.time()
-            wav = voicevox_synthesize(chunk, args.voicevox_url, args.voice)
-            tts_time = time.time() - t0
+        wav_queue = Queue(maxsize=4)
+
+        def tts_worker():
+            for i, chunk in enumerate(chunks):
+                t0 = time.time()
+                wav = voicevox_synthesize(chunk, args.voicevox_url, args.voice, args.sample_rate)
+                tts_time = time.time() - t0
+                wav_queue.put((i, chunk, wav, tts_time))
+            wav_queue.put(None)  # sentinel
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(tts_worker)
+
+        while True:
+            item = wav_queue.get()
+            if item is None:
+                break
+            i, chunk, wav, tts_time = item
             t0 = time.time()
             result = sc.send_wav(wav)
             send_time = time.time() - t0
             print(f"  [{i+1}/{len(chunks)}] TTS:{tts_time:.2f}s Send:{send_time:.2f}s ({len(wav)}B) {chunk}", file=sys.stderr)
+
+        executor.shutdown(wait=False)
     else:
-        wav = voicevox_synthesize(args.text, args.voicevox_url, args.voice)
+        wav = voicevox_synthesize(args.text, args.voicevox_url, args.voice, args.sample_rate)
         result = sc.send_wav(wav)
         result["text"] = args.text
         result["wav_size"] = len(wav)
@@ -192,6 +213,7 @@ def main():
     p_say.add_argument("text", help="Text to speak")
     p_say.add_argument("--voice", type=int, default=DEFAULT_VOICEVOX_SPEAKER, help="VOICEVOX speaker ID")
     p_say.add_argument("--pipeline", action="store_true", help="Split text for faster first response")
+    p_say.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE, help="WAV sample rate (default: 16000)")
     p_say.set_defaults(func=cmd_say)
 
     p_face = sub.add_parser("face", help="Change face expression")
