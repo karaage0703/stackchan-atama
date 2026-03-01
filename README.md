@@ -4,43 +4,64 @@
 
 ## コンセプト
 
-体（サーボ）なし、アタマ（画面+スピーカー）だけのスタックチャン。M5Stack 1 台あれば動く。
+体（サーボ）なし、アタマ（画面+スピーカー）だけのスタックチャン。M5Stack 1 台と USB ケーブルがあれば動く。
 
-- WiFi HTTP API で PC から制御
-- **外部から音声データ（WAV）を受け取って再生 + 口パク**
+- **USB シリアルで PC から制御**（WiFi 不要）
+- PC から WAV データを送信 → スピーカー再生 + 口パク
 - 表情変更（happy, sad, angry, sleepy, doubt, neutral）
-- TTS サーバー（VOICEVOX 等）は PC 側で自由に選択
+- TTS は PC 側で自由に選択（ローカル VOICEVOX 等）
+- パイプライン再生対応（文を分割して順次送信、最初のチャンクを即座に再生開始）
 
 ### AI_StackChan2 との違い
 
 | | AI_StackChan2 | stackchan-atama |
 |---|---|---|
-| TTS | クラウド API（ttsquest）に依存 | PC 側で自由に選択（ローカル VOICEVOX 等） |
-| 音声 | M5Stack がクラウドから取得 | PC が生成した WAV を M5Stack に送信 |
+| 接続 | WiFi | USB シリアル（WiFi はオプション） |
+| TTS | クラウド API に依存 | PC 側で自由に選択 |
+| 音声 | M5Stack がクラウドから取得 | PC が生成した WAV を送信 |
 | ChatGPT | M5Stack から直接 API 呼び出し | PC 側で処理（AI エージェント連携可） |
 | サーボ | あり | なし（アタマだけ） |
-| 設定 | SD カード / Web UI | SD カード / SmartConfig |
 
 ## 対応デバイス
 
 [M5Unified](https://github.com/m5stack/M5Unified) ベースなので以下のデバイスで動作：
 
-| デバイス | 画面 | スピーカー | マイク | 備考 |
-|----------|------|-----------|--------|------|
-| M5Stack Core (Basic) | 320x240 | あり | なし | |
-| M5Stack Core2 | 320x240 | あり | あり | |
-| **M5 CoreS3** | 320x240 | あり | あり | **推奨** |
-| ATOM S3 | 128x128 | なし | なし | 顔表示のみ |
+| デバイス | 画面 | スピーカー | 備考 |
+|----------|------|-----------|------|
+| **M5 CoreS3** | 320x240 | あり | **推奨** |
+| M5Stack Core2 | 320x240 | あり | |
+| M5Stack Core (Basic) | 320x240 | あり | |
 
-## HTTP API
+## シリアルコマンド
+
+USB シリアル経由で以下のテキストコマンドを送信できます（改行区切り）：
+
+| コマンド | 説明 | レスポンス例 |
+|----------|------|-------------|
+| `STATUS` | 状態取得 | `{"status":"online","wifi":false,"playing":false,"queued":0}` |
+| `FACE:happy` | 表情変更 | `{"status":"ok","expression":"happy"}` |
+| `VOLUME:200` | 音量変更(0-255) | `{"status":"ok","volume":200}` |
+| `WAV:12345` | WAV バイナリ受信 | `READY` → バイナリ送信 → `{"status":"ok","size":12345,"queued":1}` |
+| `WIFI:ssid:pass` | WiFi 接続 | `{"status":"ok","ip":"192.168.x.x"}` |
+
+### WAV 送信プロトコル
+
+1. `WAV:<バイト数>\n` を送信
+2. ESP32 が `READY\n` を返す
+3. WAV バイナリを 1KB チャンク + 5ms 間隔で送信
+4. 受信完了で `{"status":"ok","size":<バイト数>,"queued":<キュー数>}` が返る
+5. キュー（4 スロット）に入り順次再生される
+
+## HTTP API（WiFi 接続時）
+
+WiFi 接続時は HTTP API も使用可能：
 
 | エンドポイント | メソッド | 説明 |
 |---------------|---------|------|
-| `GET /` | GET | 接続確認 |
-| `POST /play_wav` | POST | WAV バイナリを受け取りスピーカー再生 + 口パク |
+| `GET /status` | GET | 状態取得 |
+| `POST /play_wav` | POST | WAV 再生 |
 | `GET /face?expression=happy` | GET | 表情変更 |
-| `GET /setting?volume=180` | GET | 音量等の設定変更 |
-| `GET /status` | GET | 状態取得（JSON） |
+| `GET /setting?volume=180` | GET | 設定変更 |
 
 ## セットアップ
 
@@ -48,67 +69,78 @@
 
 - M5Stack Core / Core2 / CoreS3 のいずれか
 - USB-C ケーブル
-- [PlatformIO CLI](https://docs.platformio.org/en/stable/core/installation.html)
+- [PlatformIO CLI](https://docs.platformio.org/en/stable/core/installation.html)（`uv tool install platformio` でもOK）
+- [VOICEVOX Engine](https://voicevox.hiroshiba.jp/)（音声合成用、PC 側で起動）
 
 ### ビルド & 書き込み
 
 ```bash
-# リポジトリをクローン
 git clone https://github.com/karaage0703/stackchan-atama.git
 cd stackchan-atama
 
-# M5 CoreS3 の場合
+# M5 CoreS3（推奨）
 pio run -e m5stack-cores3 -t upload
 
-# M5Stack Core (初代) の場合
-pio run -e m5stack-core -t upload
-
-# M5Stack Core2 の場合
+# M5Stack Core2
 pio run -e m5stack-core2 -t upload
+
+# M5Stack Core (初代)
+pio run -e m5stack-core -t upload
 ```
 
-### WiFi 設定
+書き込み後、M5Stack の画面にアバターの顔が表示されれば成功。
 
-**方法 1: SD カード**
-
-SD カードに `wifi.txt` を作成（1 行目: SSID、2 行目: パスワード）：
-```
-MyWiFiSSID
-MyWiFiPassword
-```
-
-**方法 2: SmartConfig**
-
-SD カードがない場合、[ESP-Touch](https://www.espressif.com/en/products/software/esp-touch/overview) アプリで設定。
-
-### PC 側の使い方
-
-PC 側の制御スクリプトは `tools/` にあります。依存ライブラリなし（Python 標準ライブラリのみ）。
+### PC 側ツール
 
 ```bash
 cd tools
 
-# ローカル VOICEVOX で音声合成してスタックチャンで再生
+# 接続確認
+uv run stackchan_atama.py status
+
+# 音声合成してスタックチャンで再生
 uv run stackchan_atama.py say "こんにちは"
+
+# パイプラインモード（長文を分割して高速再生）
+uv run stackchan_atama.py say "こんにちは！今日もいい天気ですね。" --pipeline
 
 # 表情変更
 uv run stackchan_atama.py face happy
 
-# 状態確認
-uv run stackchan_atama.py status
-
 # 音量変更
-uv run stackchan_atama.py setting --volume 200
+uv run stackchan_atama.py volume 200
 
-# IP アドレスを指定
-uv run stackchan_atama.py --ip 192.168.1.100 say "テスト"
+# 話者変更
+uv run stackchan_atama.py say "おはよう" --voice 3
+
+# シリアルポート指定
+uv run stackchan_atama.py --port /dev/ttyACM1 status
 ```
+
+### VOICEVOX Engine の起動
 
 PC 側で VOICEVOX Engine が動いている必要があります：
+
 ```bash
-# Docker で VOICEVOX Engine を起動
+# Docker
 docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest
+
+# または直接インストール
+# https://voicevox.hiroshiba.jp/ からダウンロード
 ```
+
+### WiFi 設定（オプション）
+
+WiFi は必須ではありません。USB シリアルだけで全機能が使えます。
+
+WiFi を使いたい場合はシリアルコマンドで接続：
+```
+WIFI:MySSID:MyPassword
+```
+
+## AI エージェント連携
+
+SKILL.md を参照してください。Claude Code や borot 等の AI エージェントから `stackchan_atama.py` を呼び出してスタックチャンを制御できます。
 
 ## 技術スタック
 
@@ -121,11 +153,11 @@ docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest
 
 このプロジェクトは、以下の素晴らしいプロジェクトと開発者の方々の成果に基づいています：
 
-- **[ｽﾀｯｸﾁｬﾝ (stack-chan)](https://github.com/stack-chan/stack-chan)** — ししかわさん ([@meganetaaan](https://github.com/meganetaaan)) が生み出した、手乗りサイズのコミュニケーションロボット。スタックチャンというコンセプトと m5stack-avatar ライブラリがなければ、このプロジェクトは存在しません
-- **[AI_StackChan2](https://github.com/robo8080/AI_StackChan2)** / **[M5Unified_StackChan](https://github.com/robo8080/M5Unified_StackChan)** — robo8080 さんによる AI スタックチャン実装。HTTP API 設計、AudioOutputM5Speaker の実装パターン、口パク（リップシンク）の仕組みなど、多くの部分を参考にしました
-- **[M5Unified](https://github.com/m5stack/M5Unified)** — らびやんさん ([@lovyan03](https://github.com/lovyan03)) による M5Stack デバイス統合ライブラリ。複数デバイスへの対応を実現する基盤です
-- **[VOICEVOX](https://voicevox.hiroshiba.jp/)** — ヒホさん ([@Hiroshiba](https://github.com/Hiroshiba)) による無料の音声合成ソフトウェア
-- **スタックチャンコミュニティ** — アイデア、作例、知見を共有してくださっている全ての方々
+- **[ｽﾀｯｸﾁｬﾝ (stack-chan)](https://github.com/stack-chan/stack-chan)** — ししかわさん ([@meganetaaan](https://github.com/meganetaaan))
+- **[AI_StackChan2](https://github.com/robo8080/AI_StackChan2)** — robo8080 さん
+- **[M5Unified](https://github.com/m5stack/M5Unified)** — らびやんさん ([@lovyan03](https://github.com/lovyan03))
+- **[VOICEVOX](https://voicevox.hiroshiba.jp/)** — ヒホさん ([@Hiroshiba](https://github.com/Hiroshiba))
+- **スタックチャンコミュニティ** — アイデア・知見を共有してくださっている全ての方々
 
 ## ライセンス
 
