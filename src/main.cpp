@@ -320,18 +320,27 @@ void handleSerialCommand(const String& cmd) {
       return;
     }
 
-    Serial.println("READY");  // Signal PC to start sending binary
+    // Drain any leftover data in serial buffer before signaling READY
+    while (Serial.available()) Serial.read();
 
-    // Read binary data from serial
+    Serial.println("READY");  // Signal PC to start sending binary
+    Serial.flush();  // Ensure READY is sent before reading
+
+    // Read binary data from serial (chunk-based for speed)
     size_t received = 0;
     unsigned long start = millis();
-    while (received < len && (millis() - start) < 30000) {  // 30s timeout
-      if (Serial.available()) {
-        size_t chunk = Serial.readBytes(wav_data + received, len - received);
-        received += chunk;
+    while (received < len && (millis() - start) < 30000) {  // 30s overall timeout
+      int avail = Serial.available();
+      if (avail > 0) {
+        size_t toRead = len - received;
+        if ((size_t)avail < toRead) toRead = avail;
+        for (size_t i = 0; i < toRead; i++) {
+          wav_data[received++] = Serial.read();
+        }
         start = millis();  // Reset timeout on data received
+      } else {
+        vTaskDelay(1);
       }
-      vTaskDelay(1);
     }
 
     if (received == len) {
@@ -455,7 +464,7 @@ void setup() {
   M5.begin(cfg);
 
   // Re-init Serial after M5.begin() for USB CDC on ESP32-S3
-  Serial.begin(115200);
+  Serial.begin(921600);
   delay(500);
 
   // Speaker config
@@ -465,7 +474,8 @@ void setup() {
     spk_cfg.dma_buf_count = 20;
     spk_cfg.dma_buf_len = 512;
     M5.Speaker.config(spk_cfg);
-    M5.Speaker.setChannelVolume(m5spk_virtual_channel, 180);
+    M5.Speaker.setVolume(255);  // Master volume max
+    M5.Speaker.setChannelVolume(m5spk_virtual_channel, 255);
   }
 
   // Start avatar
