@@ -1,0 +1,6 @@
+[project]
+name = "stackchan-atama-tools"
+version = "0.1.0"
+description = "PC-side controller for stackchan-atama"
+requires-python = ">=3.10"
+dependencies = []
