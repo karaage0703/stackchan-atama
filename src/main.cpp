@@ -283,8 +283,8 @@ void handlePlayWav() {
     return;
   }
 
-  // Allocate PSRAM for WAV data
-  uint8_t* buf = (uint8_t*)ps_malloc(len);
+  // Allocate memory for WAV data (PSRAM if available, else heap)
+  uint8_t* buf = (uint8_t*)(psramFound() ? ps_malloc(len) : malloc(len));
   if (buf == nullptr) {
     server.send(500, "application/json", "{\"error\":\"memory allocation failed\"}");
     return;
@@ -343,13 +343,14 @@ void handleSerialCommand(const String& cmd) {
       return;
     }
     size_t len = cmd.substring(4).toInt();
-    if (len < 44 || len > 1000000) {
+    size_t max_wav = psramFound() ? 1000000 : 100000;  // 1MB with PSRAM, 100KB without
+    if (len < 44 || len > max_wav) {
       Serial.println("{\"status\":\"error\",\"error\":\"invalid size\"}");
       return;
     }
 
-    // Allocate PSRAM
-    uint8_t* buf = (uint8_t*)ps_malloc(len);
+    // Allocate memory (PSRAM if available, else heap)
+    uint8_t* buf = (uint8_t*)(psramFound() ? ps_malloc(len) : malloc(len));
     if (buf == nullptr) {
       Serial.println("{\"status\":\"error\",\"error\":\"memory allocation failed\"}");
       return;
@@ -497,7 +498,11 @@ void setup() {
   M5.begin(cfg);
 
   // Re-init Serial after M5.begin() for USB CDC on ESP32-S3
-  Serial.setRxBufferSize(32768);  // 32KB receive buffer for fast WAV transfer
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  Serial.setRxBufferSize(32768);  // 32KB receive buffer (ESP32-S3 has more RAM)
+#else
+  Serial.setRxBufferSize(4096);   // 4KB receive buffer (ESP32 classic)
+#endif
   Serial.begin(921600);
   delay(500);
 
@@ -520,8 +525,8 @@ void setup() {
   audioOut = new AudioOutputM5Speaker(&M5.Speaker, m5spk_virtual_channel);
   audioOut->SetRate(24000);  // VOICEVOX default sample rate
 
-  // Start WAV playback task on core 0
-  xTaskCreatePinnedToCore(wavPlayTask, "wavPlay", 8192, nullptr, 1, nullptr, PRO_CPU_NUM);
+  // Start WAV playback task on core 1 (same as Arduino loop, needed for M5Stack Core speaker)
+  xTaskCreatePinnedToCore(wavPlayTask, "wavPlay", 8192, nullptr, 1, nullptr, APP_CPU_NUM);
 
   // WiFi (optional - will skip if no SD card credentials)
   setupWiFi();
