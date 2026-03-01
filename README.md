@@ -12,25 +12,10 @@
 - TTS は PC 側で自由に選択（ローカル VOICEVOX 等）
 - パイプライン再生対応（文を分割して順次送信、最初のチャンクを即座に再生開始）
 
-### AI_StackChan2 との違い
+## 動作確認済みデバイス
 
-| | AI_StackChan2 | stackchan-atama |
-|---|---|---|
-| 接続 | WiFi | USB シリアル（WiFi はオプション） |
-| TTS | クラウド API に依存 | PC 側で自由に選択 |
-| 音声 | M5Stack がクラウドから取得 | PC が生成した WAV を送信 |
-| ChatGPT | M5Stack から直接 API 呼び出し | PC 側で処理（AI エージェント連携可） |
-| サーボ | あり | なし（アタマだけ） |
-
-## 対応デバイス
-
-[M5Unified](https://github.com/m5stack/M5Unified) ベースなので以下のデバイスで動作：
-
-| デバイス | 画面 | スピーカー | 備考 |
-|----------|------|-----------|------|
-| **M5 CoreS3** | 320x240 | あり | **推奨** |
-| M5Stack Core2 | 320x240 | あり | |
-| M5Stack Core (Basic) | 320x240 | あり | |
+- **M5Stack CoreS3** — 推奨。USB CDC、PSRAM搭載
+- **M5Stack Core（初代/Basic）** — 動作確認済み。CP2104 UART、PSRAM無し
 
 ## シリアルコマンド
 
@@ -129,7 +114,7 @@ docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest
 # https://voicevox.hiroshiba.jp/ からダウンロード
 ```
 
-### WiFi 設定（オプション）
+### WiFi 設定（オプション・動作未確認）
 
 WiFi は必須ではありません。USB シリアルだけで全機能が使えます。
 
@@ -137,6 +122,8 @@ WiFi を使いたい場合はシリアルコマンドで接続：
 ```
 WIFI:MySSID:MyPassword
 ```
+
+> **注意**: WiFi 機能は実装済みですが、まだ動作確認を行っていません。
 
 ## AI エージェント連携
 
