@@ -94,10 +94,16 @@ WebServer server(80);
 AudioOutputM5Speaker* audioOut = nullptr;
 bool wifi_connected = false;
 
-// WAV playback state
+// WAV playback queue (ring buffer with 4 slots)
+static constexpr int WAV_QUEUE_SIZE = 4;
+struct WavSlot {
+  uint8_t* data;
+  size_t len;
+};
+WavSlot wav_queue[WAV_QUEUE_SIZE] = {};
+volatile int wav_queue_head = 0;  // Next slot to play
+volatile int wav_queue_tail = 0;  // Next slot to write
 volatile bool wav_playing = false;
-uint8_t* wav_data = nullptr;
-size_t wav_data_len = 0;
 
 // Serial command buffer
 String serial_cmd_buf = "";
@@ -158,13 +164,45 @@ private:
   size_t _pos;
 };
 
+// WAV queue helpers
+int wavQueueCount() {
+  int count = wav_queue_tail - wav_queue_head;
+  if (count < 0) count += WAV_QUEUE_SIZE;
+  return count;
+}
+
+bool wavQueueFull() {
+  return wavQueueCount() >= (WAV_QUEUE_SIZE - 1);
+}
+
+bool wavQueueEmpty() {
+  return wav_queue_head == wav_queue_tail;
+}
+
+// Enqueue WAV data (returns false if queue full)
+bool wavQueuePush(uint8_t* data, size_t len) {
+  if (wavQueueFull()) return false;
+  wav_queue[wav_queue_tail].data = data;
+  wav_queue[wav_queue_tail].len = len;
+  wav_queue_tail = (wav_queue_tail + 1) % WAV_QUEUE_SIZE;
+  return true;
+}
+
 // ---- WAV playback task ----
 void wavPlayTask(void* param) {
   while (true) {
-    if (wav_data != nullptr && wav_data_len > 0 && !wav_playing) {
+    if (!wavQueueEmpty() && !wav_playing) {
       wav_playing = true;
 
-      AudioFileSourceMemory* src = new AudioFileSourceMemory(wav_data, wav_data_len);
+      // Dequeue
+      WavSlot& slot = wav_queue[wav_queue_head];
+      uint8_t* data = slot.data;
+      size_t len = slot.len;
+      slot.data = nullptr;
+      slot.len = 0;
+      wav_queue_head = (wav_queue_head + 1) % WAV_QUEUE_SIZE;
+
+      AudioFileSourceMemory* src = new AudioFileSourceMemory(data, len);
       AudioGeneratorWAV* wav = new AudioGeneratorWAV();
 
       if (wav->begin(src, audioOut)) {
@@ -184,11 +222,8 @@ void wavPlayTask(void* param) {
       avatar.setMouthOpenRatio(0.0f);
       delete wav;
       delete src;
+      free(data);
 
-      // Free WAV data
-      free(wav_data);
-      wav_data = nullptr;
-      wav_data_len = 0;
       wav_playing = false;
     }
     vTaskDelay(10);
@@ -230,8 +265,8 @@ void handleFace() {
 }
 
 void handlePlayWav() {
-  if (wav_playing) {
-    server.send(409, "application/json", "{\"error\":\"already playing\"}");
+  if (wavQueueFull()) {
+    server.send(409, "application/json", "{\"error\":\"queue full\"}");
     return;
   }
 
@@ -249,14 +284,14 @@ void handlePlayWav() {
   }
 
   // Allocate PSRAM for WAV data
-  wav_data = (uint8_t*)ps_malloc(len);
-  if (wav_data == nullptr) {
+  uint8_t* buf = (uint8_t*)ps_malloc(len);
+  if (buf == nullptr) {
     server.send(500, "application/json", "{\"error\":\"memory allocation failed\"}");
     return;
   }
 
-  memcpy(wav_data, body.c_str(), len);
-  wav_data_len = len;
+  memcpy(buf, body.c_str(), len);
+  wavQueuePush(buf, len);
 
   JsonDocument doc;
   doc["status"] = "ok";
@@ -303,8 +338,8 @@ void handleSerialCommand(const String& cmd) {
     Serial.printf("{\"status\":\"ok\",\"expression\":\"%s\"}\n", getExpressionName(expr).c_str());
 
   } else if (cmd.startsWith("WAV:")) {
-    if (wav_playing) {
-      Serial.println("{\"status\":\"error\",\"error\":\"already playing\"}");
+    if (wavQueueFull()) {
+      Serial.println("{\"status\":\"error\",\"error\":\"queue full\"}");
       return;
     }
     size_t len = cmd.substring(4).toInt();
@@ -314,8 +349,8 @@ void handleSerialCommand(const String& cmd) {
     }
 
     // Allocate PSRAM
-    wav_data = (uint8_t*)ps_malloc(len);
-    if (wav_data == nullptr) {
+    uint8_t* buf = (uint8_t*)ps_malloc(len);
+    if (buf == nullptr) {
       Serial.println("{\"status\":\"error\",\"error\":\"memory allocation failed\"}");
       return;
     }
@@ -332,22 +367,20 @@ void handleSerialCommand(const String& cmd) {
     while (received < len && (millis() - start) < 30000) {
       int avail = Serial.available();
       if (avail > 0) {
-        // Read available bytes directly
         while (avail > 0 && received < len) {
-          wav_data[received++] = Serial.read();
+          buf[received++] = Serial.read();
           avail--;
         }
-        start = millis();  // Reset timeout
+        start = millis();
       } else {
-        delay(1);  // Yield to other tasks
+        delay(1);
       }
     }
     if (received == len) {
-      wav_data_len = len;
-      Serial.printf("{\"status\":\"ok\",\"size\":%d}\n", len);
+      wavQueuePush(buf, len);
+      Serial.printf("{\"status\":\"ok\",\"size\":%d,\"queued\":%d}\n", len, wavQueueCount());
     } else {
-      free(wav_data);
-      wav_data = nullptr;
+      free(buf);
       Serial.printf("{\"status\":\"error\",\"error\":\"incomplete\",\"received\":%d,\"expected\":%d}\n", received, len);
     }
 
@@ -359,10 +392,11 @@ void handleSerialCommand(const String& cmd) {
     Serial.printf("{\"status\":\"ok\",\"volume\":%d}\n", M5.Speaker.getChannelVolume(m5spk_virtual_channel));
 
   } else if (cmd == "STATUS") {
-    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s}\n",
+    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d}\n",
       wifi_connected ? "true" : "false",
       wifi_connected ? WiFi.localIP().toString().c_str() : "none",
-      wav_playing ? "true" : "false");
+      wav_playing ? "true" : "false",
+      wavQueueCount());
 
   } else if (cmd.startsWith("WIFI:")) {
     // WIFI:ssid:password
