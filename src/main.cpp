@@ -326,23 +326,22 @@ void handleSerialCommand(const String& cmd) {
     Serial.println("READY");  // Signal PC to start sending binary
     Serial.flush();  // Ensure READY is sent before reading
 
-    // Read binary data from serial (chunk-based for speed)
+    // Read binary data from serial
     size_t received = 0;
     unsigned long start = millis();
-    while (received < len && (millis() - start) < 30000) {  // 30s overall timeout
+    while (received < len && (millis() - start) < 30000) {
       int avail = Serial.available();
       if (avail > 0) {
-        size_t toRead = len - received;
-        if ((size_t)avail < toRead) toRead = avail;
-        for (size_t i = 0; i < toRead; i++) {
+        // Read available bytes directly
+        while (avail > 0 && received < len) {
           wav_data[received++] = Serial.read();
+          avail--;
         }
-        start = millis();  // Reset timeout on data received
+        start = millis();  // Reset timeout
       } else {
-        vTaskDelay(1);
+        delay(1);  // Yield to other tasks
       }
     }
-
     if (received == len) {
       wav_data_len = len;
       Serial.printf("{\"status\":\"ok\",\"size\":%d}\n", len);
@@ -464,6 +463,7 @@ void setup() {
   M5.begin(cfg);
 
   // Re-init Serial after M5.begin() for USB CDC on ESP32-S3
+  Serial.setRxBufferSize(32768);  // 32KB receive buffer for fast WAV transfer
   Serial.begin(921600);
   delay(500);
 
