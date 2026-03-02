@@ -78,6 +78,23 @@ pio run -e m5stack-core -t upload
 
 書き込み後、M5Stack の画面にアバターの顔が表示されれば成功。
 
+### udev ルール（Linux、オプション）
+
+USB シリアルのデバイス名を `/dev/stackchan` に固定できます。挿し順でデバイス名が変わる問題を防止。
+
+```bash
+sudo cp udev/99-stackchan.rules /etc/udev/rules.d/
+sudo udevadm control --reload
+# USB ケーブルを抜き差し
+ls -la /dev/stackchan  # -> /dev/ttyACMx へのシンボリックリンク
+```
+
+設定後は `--port /dev/stackchan` でアクセスできます：
+```bash
+uv run stackchan_atama.py --port /dev/stackchan status
+pio run -e m5stack-cores3 -t upload --upload-port /dev/stackchan
+```
+
 ### PC 側ツール
 
 ```bash

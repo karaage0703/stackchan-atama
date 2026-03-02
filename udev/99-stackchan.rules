@@ -1,0 +1,3 @@
+# stackchan-atama: M5Stack CoreS3 (ESP32-S3 USB JTAG/serial)
+# Install: sudo cp udev/99-stackchan.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", SYMLINK+="stackchan", MODE="0666"
