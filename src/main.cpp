@@ -20,6 +20,16 @@
 #include <AudioOutputI2S.h>
 #include <SD.h>
 
+// Camera support (CoreS3 only)
+#if defined(ENABLE_CAMERA)
+#include <esp_camera.h>
+#include "mbedtls/base64.h"
+static bool camera_initialized = false;
+// Forward declarations
+bool setupCamera();
+void handleCapture();
+#endif
+
 // ---- Configuration ----
 // WiFi credentials: set via Serial or SD card
 String wifi_ssid = "";
@@ -393,11 +403,20 @@ void handleSerialCommand(const String& cmd) {
     Serial.printf("{\"status\":\"ok\",\"volume\":%d}\n", M5.Speaker.getChannelVolume(m5spk_virtual_channel));
 
   } else if (cmd == "STATUS") {
-    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d}\n",
+#if defined(ENABLE_CAMERA)
+    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":%s}\n",
+      wifi_connected ? "true" : "false",
+      wifi_connected ? WiFi.localIP().toString().c_str() : "none",
+      wav_playing ? "true" : "false",
+      wavQueueCount(),
+      camera_initialized ? "true" : "false");
+#else
+    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":false}\n",
       wifi_connected ? "true" : "false",
       wifi_connected ? WiFi.localIP().toString().c_str() : "none",
       wav_playing ? "true" : "false",
       wavQueueCount());
+#endif
 
   } else if (cmd.startsWith("WIFI:")) {
     // WIFI:ssid:password
@@ -431,10 +450,118 @@ void handleSerialCommand(const String& cmd) {
       }
     }
 
+  } else if (cmd == "CAPTURE") {
+#if defined(ENABLE_CAMERA)
+    handleCapture();
+#else
+    Serial.println("{\"status\":\"error\",\"error\":\"camera not supported on this device\"}");
+#endif
+
   } else {
     Serial.printf("{\"status\":\"error\",\"error\":\"unknown command: %s\"}\n", cmd.c_str());
   }
 }
+
+// ---- Camera Setup (CoreS3 only) ----
+#if defined(ENABLE_CAMERA)
+bool setupCamera() {
+  // Release M5Unified's internal I2C so esp_camera can use GPIO 11/12
+  M5.In_I2C.release();
+
+  camera_config_t config = {};
+  config.pin_pwdn     = -1;
+  config.pin_reset    = -1;
+  config.pin_xclk     = 2;
+  config.pin_sccb_sda = 12;
+  config.pin_sccb_scl = 11;
+  config.pin_d7       = 47;
+  config.pin_d6       = 48;
+  config.pin_d5       = 16;
+  config.pin_d4       = 15;
+  config.pin_d3       = 42;
+  config.pin_d2       = 41;
+  config.pin_d1       = 40;
+  config.pin_d0       = 39;
+  config.pin_vsync    = 46;
+  config.pin_href     = 38;
+  config.pin_pclk     = 45;
+
+  config.xclk_freq_hz = 20000000;
+  config.ledc_timer   = LEDC_TIMER_1;    // Avoid conflict with M5Speaker
+  config.ledc_channel = LEDC_CHANNEL_1;  // Avoid conflict with M5Speaker
+  config.pixel_format = PIXFORMAT_RGB565;
+  config.frame_size   = FRAMESIZE_QVGA;  // 320x240
+  config.jpeg_quality = 12;
+  config.fb_count     = 2;
+  config.fb_location  = CAMERA_FB_IN_PSRAM;
+  config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
+  config.sccb_i2c_port = -1;  // Let esp_camera manage I2C
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("[CAM] init failed: 0x%x\n", err);
+    return false;
+  }
+  Serial.println("[CAM] initialized");
+  return true;
+}
+
+void handleCapture() {
+  if (!camera_initialized) {
+    Serial.println("{\"status\":\"error\",\"error\":\"camera not available\"}");
+    return;
+  }
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("{\"status\":\"error\",\"error\":\"capture failed\"}");
+    return;
+  }
+
+  // Convert RGB565 to JPEG
+  uint8_t* jpg_buf = NULL;
+  size_t jpg_len = 0;
+  bool ok = frame2jpg(fb, 80, &jpg_buf, &jpg_len);
+  esp_camera_fb_return(fb);
+
+  if (!ok || !jpg_buf) {
+    Serial.println("{\"status\":\"error\",\"error\":\"jpeg conversion failed\"}");
+    return;
+  }
+
+  // Base64 encode
+  size_t b64_len = 0;
+  mbedtls_base64_encode(NULL, 0, &b64_len, jpg_buf, jpg_len);
+  uint8_t* b64_buf = (uint8_t*)ps_malloc(b64_len + 1);
+  if (!b64_buf) {
+    free(jpg_buf);
+    Serial.println("{\"status\":\"error\",\"error\":\"base64 alloc failed\"}");
+    return;
+  }
+
+  mbedtls_base64_encode(b64_buf, b64_len + 1, &b64_len, jpg_buf, jpg_len);
+  b64_buf[b64_len] = '\0';
+  free(jpg_buf);
+
+  // Send: header line + base64 data + END marker
+  Serial.printf("{\"status\":\"ok\",\"format\":\"jpeg\",\"size\":%d,\"b64_size\":%d}\n", jpg_len, b64_len);
+  Serial.flush();
+
+  // Send base64 in chunks to avoid serial buffer overflow
+  size_t sent = 0;
+  while (sent < b64_len) {
+    size_t chunk = (b64_len - sent > 1024) ? 1024 : (b64_len - sent);
+    Serial.write(b64_buf + sent, chunk);
+    sent += chunk;
+    Serial.flush();
+  }
+  Serial.println();  // newline after base64
+  Serial.println("END_CAPTURE");
+  Serial.flush();
+
+  free(b64_buf);
+}
+#endif
 
 // ---- WiFi Setup ----
 void setupWiFi() {
@@ -543,7 +670,12 @@ void setup() {
     Serial.println("HTTP server started on port 80");
   }
 
-  Serial.println("Serial commands ready: FACE:expr WAV:size VOLUME:vol STATUS WIFI:ssid:pass");
+  // Camera init (CoreS3 only)
+#if defined(ENABLE_CAMERA)
+  camera_initialized = setupCamera();
+#endif
+
+  Serial.println("Serial commands ready: FACE:expr WAV:size VOLUME:vol STATUS WIFI:ssid:pass CAPTURE");
 }
 
 // ---- Loop ----
