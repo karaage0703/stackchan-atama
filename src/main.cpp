@@ -19,6 +19,9 @@
 #include <AudioFileSourceBuffer.h>
 #include <AudioOutputI2S.h>
 #include <SD.h>
+#include <Preferences.h>
+
+Preferences preferences;
 
 // Camera support (CoreS3 only)
 #if defined(ENABLE_CAMERA)
@@ -31,9 +34,13 @@ void handleCapture();
 #endif
 
 // ---- Configuration ----
-// WiFi credentials: set via Serial or SD card
+// WiFi credentials: set via Serial, NVS, or SD card
 String wifi_ssid = "";
 String wifi_pass = "";
+
+// Forward declarations for WiFi credential management
+void saveWiFiCredentials(const String& ssid, const String& pass);
+void clearWiFiCredentials();
 
 // ---- Audio ----
 static constexpr uint8_t m5spk_virtual_channel = 0;
@@ -418,6 +425,10 @@ void handleSerialCommand(const String& cmd) {
       wavQueueCount());
 #endif
 
+  } else if (cmd == "WIFI:CLEAR") {
+    clearWiFiCredentials();
+    Serial.println("{\"status\":\"ok\",\"message\":\"wifi credentials cleared\"}");
+
   } else if (cmd.startsWith("WIFI:")) {
     // WIFI:ssid:password
     int first_colon = cmd.indexOf(':', 5);
@@ -437,6 +448,7 @@ void handleSerialCommand(const String& cmd) {
       }
       if (WiFi.status() == WL_CONNECTED) {
         wifi_connected = true;
+        saveWiFiCredentials(wifi_ssid, wifi_pass);
         server.begin();
         Serial.printf("{\"status\":\"ok\",\"ip\":\"%s\"}\n", WiFi.localIP().toString().c_str());
         avatar.setSpeechText(WiFi.localIP().toString().c_str());
@@ -561,31 +573,67 @@ void handleCapture() {
 
   free(b64_buf);
 }
+
+void handleCaptureHTTP() {
+  if (!camera_initialized) {
+    server.send(503, "application/json", "{\"error\":\"camera not available\"}");
+    return;
+  }
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) {
+    server.send(500, "application/json", "{\"error\":\"capture failed\"}");
+    return;
+  }
+
+  // Convert RGB565 to JPEG
+  uint8_t* jpg_buf = NULL;
+  size_t jpg_len = 0;
+  bool ok = frame2jpg(fb, 80, &jpg_buf, &jpg_len);
+  esp_camera_fb_return(fb);
+
+  if (!ok || !jpg_buf) {
+    server.send(500, "application/json", "{\"error\":\"jpeg conversion failed\"}");
+    return;
+  }
+
+  server.sendHeader("Content-Disposition", "inline; filename=\"capture.jpg\"");
+  server.send_P(200, "image/jpeg", (const char*)jpg_buf, jpg_len);
+  free(jpg_buf);
+}
 #endif
 
 // ---- WiFi Setup ----
-void setupWiFi() {
-  // Try to read from SD card first (only if SD is available)
-  // Note: On CoreS3 without SD card, SD.begin can hang or cause GPIO errors
-  // So we skip SD entirely and rely on serial WIFI command
-  #if 0
-  if (SD.begin(GPIO_NUM_NC, SPI, 25000000)) {
-    File f = SD.open("/wifi.txt");
-    if (f) {
-      wifi_ssid = f.readStringUntil('\n');
-      wifi_pass = f.readStringUntil('\n');
-      wifi_ssid.trim();
-      wifi_pass.trim();
-      f.close();
-      Serial.println("WiFi credentials loaded from SD card");
-    }
-  }
-  #endif
+void saveWiFiCredentials(const String& ssid, const String& pass) {
+  preferences.begin("wifi", false);
+  preferences.putString("ssid", ssid);
+  preferences.putString("pass", pass);
+  preferences.end();
+  Serial.println("[NVS] WiFi credentials saved");
+}
 
-  // If no SD card credentials, skip WiFi (use serial instead)
+void clearWiFiCredentials() {
+  preferences.begin("wifi", false);
+  preferences.clear();
+  preferences.end();
+  wifi_ssid = "";
+  wifi_pass = "";
+  Serial.println("[NVS] WiFi credentials cleared");
+}
+
+void setupWiFi() {
+  // Load credentials from NVS
+  preferences.begin("wifi", true);  // read-only
+  wifi_ssid = preferences.getString("ssid", "");
+  wifi_pass = preferences.getString("pass", "");
+  preferences.end();
+
+  if (!wifi_ssid.isEmpty()) {
+    Serial.println("[NVS] WiFi credentials loaded");
+  }
+
   if (wifi_ssid.isEmpty()) {
     Serial.println("No WiFi credentials. Use serial command WIFI:ssid:password to connect.");
-    Serial.println("Or use USB serial commands: FACE:happy, WAV:size, STATUS, VOLUME:180");
     avatar.setSpeechText("USB Ready");
     delay(1500);
     avatar.setSpeechText("");
@@ -664,6 +712,9 @@ void setup() {
   server.on("/face", HTTP_GET, handleFace);
   server.on("/play_wav", HTTP_POST, handlePlayWav);
   server.on("/setting", HTTP_GET, handleSetting);
+#if defined(ENABLE_CAMERA)
+  server.on("/capture", HTTP_GET, handleCaptureHTTP);
+#endif
   server.onNotFound(handleNotFound);
   if (wifi_connected) {
     server.begin();

@@ -247,6 +247,21 @@ def cmd_volume(args):
     sc.close()
 
 
+def cmd_wifi(args):
+    sc = StackchanSerial(args.port, args.baud)
+    sc.open()
+    if args.clear:
+        result = sc.send_command("WIFI:CLEAR")
+    else:
+        if not args.ssid:
+            print("Error: --ssid is required (or use --clear)", file=sys.stderr)
+            sys.exit(1)
+        password = args.password or ""
+        result = sc.send_command(f"WIFI:{args.ssid}:{password}")
+    print(json.dumps(result, ensure_ascii=False))
+    sc.close()
+
+
 def cmd_capture(args):
     sc = StackchanSerial(args.port, args.baud)
     sc.open()
@@ -287,6 +302,12 @@ def main():
     p_volume = sub.add_parser("volume", help="Set speaker volume")
     p_volume.add_argument("level", type=int, help="Volume level (0-255)")
     p_volume.set_defaults(func=cmd_volume)
+
+    p_wifi = sub.add_parser("wifi", help="Set or clear WiFi credentials (saved to NVS)")
+    p_wifi.add_argument("--ssid", help="WiFi SSID")
+    p_wifi.add_argument("--password", default="", help="WiFi password")
+    p_wifi.add_argument("--clear", action="store_true", help="Clear saved WiFi credentials")
+    p_wifi.set_defaults(func=cmd_wifi)
 
     p_capture = sub.add_parser("capture", help="Capture image from camera (CoreS3 only)")
     p_capture.add_argument("-o", "--output", default=None, help="Output file (default: capture.jpg)")
