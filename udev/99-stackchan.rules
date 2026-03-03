@@ -1,0 +1,7 @@
+# stackchan-atama udev rules
+# Install: sudo cp udev/99-stackchan.rules /etc/udev/rules.d/ && sudo udevadm control --reload
+#
+# M5Stack CoreS3 (ESP32-S3 USB JTAG/serial)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", SYMLINK+="stackchan", MODE="0666"
+# M5Stack Core / Core2 (CP2104 USB to UART)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="stackchan", MODE="0666"

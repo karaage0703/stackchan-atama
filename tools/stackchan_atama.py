@@ -19,11 +19,13 @@ Usage:
 # ///
 
 import argparse
+import base64
 import json
 import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from queue import Queue
 
 import requests
@@ -111,6 +113,49 @@ class StackchanSerial:
                         pass
             time.sleep(0.05)
         return {"status": "ok", "size": len(wav_data), "note": "no confirmation received"}
+
+    def capture(self):
+        """Capture JPEG image from camera and return bytes"""
+        self.ser.write(b"CAPTURE\n")
+        self.ser.flush()
+
+        # Read header JSON
+        deadline = time.time() + 5
+        header = None
+        while time.time() < deadline:
+            if self.ser.in_waiting:
+                line = self.ser.readline().decode("utf-8", errors="replace").strip()
+                if line.startswith("{"):
+                    try:
+                        header = json.loads(line)
+                        break
+                    except json.JSONDecodeError:
+                        pass
+            time.sleep(0.05)
+
+        if not header:
+            return None, {"status": "error", "error": "no response"}
+        if header.get("status") == "error":
+            return None, header
+
+        # Read base64 data until END_CAPTURE
+        b64_data = b""
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if self.ser.in_waiting:
+                line = self.ser.readline()
+                text = line.decode("utf-8", errors="replace").strip()
+                if text == "END_CAPTURE":
+                    break
+                b64_data += line.strip()
+            time.sleep(0.01)
+
+        try:
+            jpg_data = base64.b64decode(b64_data)
+        except Exception as e:
+            return None, {"status": "error", "error": f"base64 decode failed: {e}"}
+
+        return jpg_data, header
 
 
 # ---- VOICEVOX ----
@@ -202,6 +247,37 @@ def cmd_volume(args):
     sc.close()
 
 
+def cmd_wifi(args):
+    sc = StackchanSerial(args.port, args.baud)
+    sc.open()
+    if args.clear:
+        result = sc.send_command("WIFI:CLEAR")
+    else:
+        if not args.ssid:
+            print("Error: --ssid is required (or use --clear)", file=sys.stderr)
+            sys.exit(1)
+        password = args.password or ""
+        result = sc.send_command(f"WIFI:{args.ssid}:{password}")
+    print(json.dumps(result, ensure_ascii=False))
+    sc.close()
+
+
+def cmd_capture(args):
+    sc = StackchanSerial(args.port, args.baud)
+    sc.open()
+    jpg_data, info = sc.capture()
+    sc.close()
+
+    if jpg_data is None:
+        print(json.dumps(info, ensure_ascii=False), file=sys.stderr)
+        sys.exit(1)
+
+    output = args.output or "capture.jpg"
+    Path(output).write_bytes(jpg_data)
+    print(f"Saved {len(jpg_data)} bytes to {output}", file=sys.stderr)
+    print(json.dumps({"status": "ok", "file": output, "size": len(jpg_data)}, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(description="stackchan-atama controller")
     parser.add_argument("--port", default=DEFAULT_PORT, help="Serial port (default: /dev/ttyACM0)")
@@ -226,6 +302,16 @@ def main():
     p_volume = sub.add_parser("volume", help="Set speaker volume")
     p_volume.add_argument("level", type=int, help="Volume level (0-255)")
     p_volume.set_defaults(func=cmd_volume)
+
+    p_wifi = sub.add_parser("wifi", help="Set or clear WiFi credentials (saved to NVS)")
+    p_wifi.add_argument("--ssid", help="WiFi SSID")
+    p_wifi.add_argument("--password", default="", help="WiFi password")
+    p_wifi.add_argument("--clear", action="store_true", help="Clear saved WiFi credentials")
+    p_wifi.set_defaults(func=cmd_wifi)
+
+    p_capture = sub.add_parser("capture", help="Capture image from camera (CoreS3 only)")
+    p_capture.add_argument("-o", "--output", default=None, help="Output file (default: capture.jpg)")
+    p_capture.set_defaults(func=cmd_capture)
 
     args = parser.parse_args()
     args.func(args)

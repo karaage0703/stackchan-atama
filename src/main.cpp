@@ -12,18 +12,35 @@
 
 #include <M5Unified.h>
 #include <Avatar.h>
-#include <WebServer.h>
+#include <ESPAsyncWebServer.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <AudioGeneratorWAV.h>
 #include <AudioFileSourceBuffer.h>
 #include <AudioOutputI2S.h>
 #include <SD.h>
+#include <Preferences.h>
+
+Preferences preferences;
+
+// Camera support (CoreS3 only)
+#if defined(ENABLE_CAMERA)
+#include <esp_camera.h>
+#include "mbedtls/base64.h"
+static bool camera_initialized = false;
+// Forward declarations
+bool setupCamera();
+void handleCapture();
+#endif
 
 // ---- Configuration ----
-// WiFi credentials: set via Serial or SD card
+// WiFi credentials: set via Serial, NVS, or SD card
 String wifi_ssid = "";
 String wifi_pass = "";
+
+// Forward declarations for WiFi credential management
+void saveWiFiCredentials(const String& ssid, const String& pass);
+void clearWiFiCredentials();
 
 // ---- Audio ----
 static constexpr uint8_t m5spk_virtual_channel = 0;
@@ -90,7 +107,7 @@ private:
 // ---- Globals ----
 using namespace m5avatar;
 Avatar avatar;
-WebServer server(80);
+AsyncWebServer server(80);
 AudioOutputM5Speaker* audioOut = nullptr;
 bool wifi_connected = false;
 
@@ -230,29 +247,30 @@ void wavPlayTask(void* param) {
   }
 }
 
-// ---- HTTP Handlers ----
-void handleRoot() {
-  server.send(200, "text/plain", "hello from stackchan-atama!");
+// ---- HTTP Handlers (ESPAsyncWebServer) ----
+void handleRoot(AsyncWebServerRequest *request) {
+  request->send(200, "text/plain", "hello from stackchan-atama!");
 }
 
-void handleStatus() {
+void handleStatus(AsyncWebServerRequest *request) {
   JsonDocument doc;
   doc["status"] = "online";
   doc["ip"] = WiFi.localIP().toString();
   doc["playing"] = wav_playing;
+  doc["queued"] = wavQueueCount();
 
   String json;
   serializeJson(doc, json);
-  server.send(200, "application/json", json);
+  request->send(200, "application/json", json);
 }
 
-void handleFace() {
-  String expr_str = server.arg("expression");
-  if (expr_str.isEmpty()) {
-    server.send(400, "application/json", "{\"error\":\"expression parameter required\"}");
+void handleFace(AsyncWebServerRequest *request) {
+  if (!request->hasParam("expression")) {
+    request->send(400, "application/json", "{\"error\":\"expression parameter required\"}");
     return;
   }
 
+  String expr_str = request->getParam("expression")->value();
   Expression expr = getExpression(expr_str);
   avatar.setExpression(expr);
 
@@ -261,50 +279,12 @@ void handleFace() {
   doc["expression"] = getExpressionName(expr);
   String json;
   serializeJson(doc, json);
-  server.send(200, "application/json", json);
+  request->send(200, "application/json", json);
 }
 
-void handlePlayWav() {
-  if (wavQueueFull()) {
-    server.send(409, "application/json", "{\"error\":\"queue full\"}");
-    return;
-  }
-
-  if (!server.hasArg("plain")) {
-    server.send(400, "application/json", "{\"error\":\"no wav data in body\"}");
-    return;
-  }
-
-  String body = server.arg("plain");
-  size_t len = body.length();
-
-  if (len < 44) {  // WAV header minimum
-    server.send(400, "application/json", "{\"error\":\"data too small for WAV\"}");
-    return;
-  }
-
-  // Allocate memory for WAV data (PSRAM if available, else heap)
-  uint8_t* buf = (uint8_t*)(psramFound() ? ps_malloc(len) : malloc(len));
-  if (buf == nullptr) {
-    server.send(500, "application/json", "{\"error\":\"memory allocation failed\"}");
-    return;
-  }
-
-  memcpy(buf, body.c_str(), len);
-  wavQueuePush(buf, len);
-
-  JsonDocument doc;
-  doc["status"] = "ok";
-  doc["size"] = len;
-  String json;
-  serializeJson(doc, json);
-  server.send(200, "application/json", json);
-}
-
-void handleSetting() {
-  String vol_str = server.arg("volume");
-  if (!vol_str.isEmpty()) {
-    int vol = vol_str.toInt();
+void handleSetting(AsyncWebServerRequest *request) {
+  if (request->hasParam("volume")) {
+    int vol = request->getParam("volume")->value().toInt();
     if (vol >= 0 && vol <= 255) {
       M5.Speaker.setChannelVolume(m5spk_virtual_channel, vol);
     }
@@ -315,11 +295,11 @@ void handleSetting() {
   doc["volume"] = M5.Speaker.getChannelVolume(m5spk_virtual_channel);
   String json;
   serializeJson(doc, json);
-  server.send(200, "application/json", json);
+  request->send(200, "application/json", json);
 }
 
-void handleNotFound() {
-  server.send(404, "application/json", "{\"error\":\"not found\"}");
+void handleNotFound(AsyncWebServerRequest *request) {
+  request->send(404, "application/json", "{\"error\":\"not found\"}");
 }
 
 // ---- Serial Command Handler ----
@@ -393,11 +373,24 @@ void handleSerialCommand(const String& cmd) {
     Serial.printf("{\"status\":\"ok\",\"volume\":%d}\n", M5.Speaker.getChannelVolume(m5spk_virtual_channel));
 
   } else if (cmd == "STATUS") {
-    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d}\n",
+#if defined(ENABLE_CAMERA)
+    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":%s}\n",
+      wifi_connected ? "true" : "false",
+      wifi_connected ? WiFi.localIP().toString().c_str() : "none",
+      wav_playing ? "true" : "false",
+      wavQueueCount(),
+      camera_initialized ? "true" : "false");
+#else
+    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":false}\n",
       wifi_connected ? "true" : "false",
       wifi_connected ? WiFi.localIP().toString().c_str() : "none",
       wav_playing ? "true" : "false",
       wavQueueCount());
+#endif
+
+  } else if (cmd == "WIFI:CLEAR") {
+    clearWiFiCredentials();
+    Serial.println("{\"status\":\"ok\",\"message\":\"wifi credentials cleared\"}");
 
   } else if (cmd.startsWith("WIFI:")) {
     // WIFI:ssid:password
@@ -418,6 +411,8 @@ void handleSerialCommand(const String& cmd) {
       }
       if (WiFi.status() == WL_CONNECTED) {
         wifi_connected = true;
+        WiFi.setSleep(false);  // Disable WiFi power saving for lower latency
+        saveWiFiCredentials(wifi_ssid, wifi_pass);
         server.begin();
         Serial.printf("{\"status\":\"ok\",\"ip\":\"%s\"}\n", WiFi.localIP().toString().c_str());
         avatar.setSpeechText(WiFi.localIP().toString().c_str());
@@ -431,34 +426,201 @@ void handleSerialCommand(const String& cmd) {
       }
     }
 
+  } else if (cmd == "CAPTURE") {
+#if defined(ENABLE_CAMERA)
+    handleCapture();
+#else
+    Serial.println("{\"status\":\"error\",\"error\":\"camera not supported on this device\"}");
+#endif
+
   } else {
     Serial.printf("{\"status\":\"error\",\"error\":\"unknown command: %s\"}\n", cmd.c_str());
   }
 }
 
-// ---- WiFi Setup ----
-void setupWiFi() {
-  // Try to read from SD card first (only if SD is available)
-  // Note: On CoreS3 without SD card, SD.begin can hang or cause GPIO errors
-  // So we skip SD entirely and rely on serial WIFI command
-  #if 0
-  if (SD.begin(GPIO_NUM_NC, SPI, 25000000)) {
-    File f = SD.open("/wifi.txt");
-    if (f) {
-      wifi_ssid = f.readStringUntil('\n');
-      wifi_pass = f.readStringUntil('\n');
-      wifi_ssid.trim();
-      wifi_pass.trim();
-      f.close();
-      Serial.println("WiFi credentials loaded from SD card");
-    }
-  }
-  #endif
+// ---- Camera Setup (CoreS3 only) ----
+#if defined(ENABLE_CAMERA)
+bool setupCamera() {
+  // Release M5Unified's internal I2C so esp_camera can use GPIO 11/12
+  M5.In_I2C.release();
 
-  // If no SD card credentials, skip WiFi (use serial instead)
+  camera_config_t config = {};
+  config.pin_pwdn     = -1;
+  config.pin_reset    = -1;
+  config.pin_xclk     = 2;
+  config.pin_sccb_sda = 12;
+  config.pin_sccb_scl = 11;
+  config.pin_d7       = 47;
+  config.pin_d6       = 48;
+  config.pin_d5       = 16;
+  config.pin_d4       = 15;
+  config.pin_d3       = 42;
+  config.pin_d2       = 41;
+  config.pin_d1       = 40;
+  config.pin_d0       = 39;
+  config.pin_vsync    = 46;
+  config.pin_href     = 38;
+  config.pin_pclk     = 45;
+
+  config.xclk_freq_hz = 20000000;
+  config.ledc_timer   = LEDC_TIMER_1;    // Avoid conflict with M5Speaker
+  config.ledc_channel = LEDC_CHANNEL_1;  // Avoid conflict with M5Speaker
+  config.pixel_format = PIXFORMAT_RGB565;
+  config.frame_size   = FRAMESIZE_QVGA;  // 320x240
+  config.jpeg_quality = 12;
+  config.fb_count     = 2;
+  config.fb_location  = CAMERA_FB_IN_PSRAM;
+  config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
+  config.sccb_i2c_port = -1;  // Let esp_camera manage I2C
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("[CAM] init failed: 0x%x\n", err);
+    return false;
+  }
+
+  // Discard first few frames to let AWB/AEC stabilize
+  for (int i = 0; i < 4; i++) {
+    camera_fb_t* fb = esp_camera_fb_get();
+    if (fb) esp_camera_fb_return(fb);
+    delay(50);
+  }
+
+  Serial.println("[CAM] initialized");
+  return true;
+}
+
+void handleCapture() {
+  if (!camera_initialized) {
+    Serial.println("{\"status\":\"error\",\"error\":\"camera not available\"}");
+    return;
+  }
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("{\"status\":\"error\",\"error\":\"capture failed\"}");
+    return;
+  }
+
+  // Convert RGB565 to JPEG
+  uint8_t* jpg_buf = NULL;
+  size_t jpg_len = 0;
+  bool ok = frame2jpg(fb, 80, &jpg_buf, &jpg_len);
+  esp_camera_fb_return(fb);
+
+  if (!ok || !jpg_buf) {
+    Serial.println("{\"status\":\"error\",\"error\":\"jpeg conversion failed\"}");
+    return;
+  }
+
+  // Base64 encode
+  size_t b64_len = 0;
+  mbedtls_base64_encode(NULL, 0, &b64_len, jpg_buf, jpg_len);
+  uint8_t* b64_buf = (uint8_t*)ps_malloc(b64_len + 1);
+  if (!b64_buf) {
+    free(jpg_buf);
+    Serial.println("{\"status\":\"error\",\"error\":\"base64 alloc failed\"}");
+    return;
+  }
+
+  mbedtls_base64_encode(b64_buf, b64_len + 1, &b64_len, jpg_buf, jpg_len);
+  b64_buf[b64_len] = '\0';
+  free(jpg_buf);
+
+  // Send: header line + base64 data + END marker
+  Serial.printf("{\"status\":\"ok\",\"format\":\"jpeg\",\"size\":%d,\"b64_size\":%d}\n", jpg_len, b64_len);
+  Serial.flush();
+
+  // Send base64 in chunks to avoid serial buffer overflow
+  size_t sent = 0;
+  while (sent < b64_len) {
+    size_t chunk = (b64_len - sent > 1024) ? 1024 : (b64_len - sent);
+    Serial.write(b64_buf + sent, chunk);
+    sent += chunk;
+    Serial.flush();
+  }
+  Serial.println();  // newline after base64
+  Serial.println("END_CAPTURE");
+  Serial.flush();
+
+  free(b64_buf);
+}
+
+void handleCaptureHTTP(AsyncWebServerRequest *request) {
+  if (!camera_initialized) {
+    request->send(503, "application/json", "{\"error\":\"camera not available\"}");
+    return;
+  }
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) {
+    request->send(500, "application/json", "{\"error\":\"capture failed\"}");
+    return;
+  }
+
+  // Convert RGB565 to JPEG
+  uint8_t* jpg_buf = NULL;
+  size_t jpg_len = 0;
+  bool ok = frame2jpg(fb, 80, &jpg_buf, &jpg_len);
+  esp_camera_fb_return(fb);
+
+  if (!ok || !jpg_buf) {
+    request->send(500, "application/json", "{\"error\":\"jpeg conversion failed\"}");
+    return;
+  }
+
+  // Use chunked response with captured buffer pointer and length
+  uint8_t* capture_buf = jpg_buf;
+  size_t capture_len = jpg_len;
+  AsyncWebServerResponse *response = request->beginChunkedResponse(
+    "image/jpeg",
+    [capture_buf, capture_len](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
+      if (index >= capture_len) {
+        free(capture_buf);
+        return 0;  // Done
+      }
+      size_t toSend = capture_len - index;
+      if (toSend > maxLen) toSend = maxLen;
+      memcpy(buffer, capture_buf + index, toSend);
+      return toSend;
+    }
+  );
+  response->addHeader("Content-Disposition", "inline; filename=\"capture.jpg\"");
+  request->send(response);
+}
+#endif
+
+// ---- WiFi Setup ----
+void saveWiFiCredentials(const String& ssid, const String& pass) {
+  preferences.begin("wifi", false);
+  preferences.putString("ssid", ssid);
+  preferences.putString("pass", pass);
+  preferences.end();
+  Serial.println("[NVS] WiFi credentials saved");
+}
+
+void clearWiFiCredentials() {
+  preferences.begin("wifi", false);
+  preferences.clear();
+  preferences.end();
+  wifi_ssid = "";
+  wifi_pass = "";
+  Serial.println("[NVS] WiFi credentials cleared");
+}
+
+void setupWiFi() {
+  // Load credentials from NVS
+  preferences.begin("wifi", true);  // read-only
+  wifi_ssid = preferences.getString("ssid", "");
+  wifi_pass = preferences.getString("pass", "");
+  preferences.end();
+
+  if (!wifi_ssid.isEmpty()) {
+    Serial.println("[NVS] WiFi credentials loaded");
+  }
+
   if (wifi_ssid.isEmpty()) {
     Serial.println("No WiFi credentials. Use serial command WIFI:ssid:password to connect.");
-    Serial.println("Or use USB serial commands: FACE:happy, WAV:size, STATUS, VOLUME:180");
     avatar.setSpeechText("USB Ready");
     delay(1500);
     avatar.setSpeechText("");
@@ -479,6 +641,7 @@ void setupWiFi() {
 
   if (WiFi.status() == WL_CONNECTED) {
     wifi_connected = true;
+    WiFi.setSleep(false);  // Disable WiFi power saving for lower latency
     Serial.printf("\nConnected! IP: %s\n", WiFi.localIP().toString().c_str());
     avatar.setSpeechText(WiFi.localIP().toString().c_str());
     delay(2000);
@@ -531,29 +694,74 @@ void setup() {
   // WiFi (optional - will skip if no SD card credentials)
   setupWiFi();
 
-  // HTTP server (register endpoints, start only if WiFi connected)
+  // HTTP server (ESPAsyncWebServer - register endpoints)
   server.on("/", HTTP_GET, handleRoot);
   server.on("/status", HTTP_GET, handleStatus);
   server.on("/face", HTTP_GET, handleFace);
-  server.on("/play_wav", HTTP_POST, handlePlayWav);
   server.on("/setting", HTTP_GET, handleSetting);
+#if defined(ENABLE_CAMERA)
+  server.on("/capture", HTTP_GET, handleCaptureHTTP);
+#endif
+
+  // play_wav: POST binary WAV data
+  // Usage: curl -X POST -H "Content-Type: application/octet-stream" --data-binary @audio.wav http://<ip>/play_wav
+  server.on("/play_wav", HTTP_POST,
+    [](AsyncWebServerRequest *request) {
+      uint8_t* buf = (uint8_t*)request->_tempObject;
+      if (!buf) {
+        request->send(400, "application/json", "{\"error\":\"no data received\"}");
+        return;
+      }
+      request->_tempObject = nullptr;
+      size_t len = request->contentLength();
+      if (wavQueueFull()) {
+        free(buf);
+        request->send(409, "application/json", "{\"error\":\"queue full\"}");
+        return;
+      }
+      wavQueuePush(buf, len);
+      JsonDocument doc;
+      doc["status"] = "ok";
+      doc["size"] = len;
+      doc["queued"] = wavQueueCount();
+      String json;
+      serializeJson(doc, json);
+      request->send(200, "application/json", json);
+    },
+    NULL,
+    [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+      if (index == 0) {
+        if (total < 44 || total > 512000) return;
+        uint8_t* buf = (uint8_t*)(psramFound() ? ps_malloc(total) : malloc(total));
+        if (!buf) return;
+        request->_tempObject = buf;
+      }
+      uint8_t* buf = (uint8_t*)request->_tempObject;
+      if (buf) {
+        memcpy(buf + index, data, len);
+      }
+    }
+  );
+
   server.onNotFound(handleNotFound);
   if (wifi_connected) {
     server.begin();
     Serial.println("HTTP server started on port 80");
   }
 
-  Serial.println("Serial commands ready: FACE:expr WAV:size VOLUME:vol STATUS WIFI:ssid:pass");
+  // Camera init (CoreS3 only)
+#if defined(ENABLE_CAMERA)
+  camera_initialized = setupCamera();
+#endif
+
+  Serial.println("Serial commands ready: FACE:expr WAV:size VOLUME:vol STATUS WIFI:ssid:pass CAPTURE");
 }
 
 // ---- Loop ----
 void loop() {
   M5.update();
 
-  // Handle HTTP clients (if WiFi connected)
-  if (wifi_connected) {
-    server.handleClient();
-  }
+  // Note: ESPAsyncWebServer handles HTTP clients automatically (no handleClient() needed)
 
   // Handle serial commands
   while (Serial.available()) {
