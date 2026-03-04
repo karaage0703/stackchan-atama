@@ -14,8 +14,13 @@
 
 ## 動作確認済みデバイス
 
-- **M5Stack CoreS3** — 推奨。USB CDC、PSRAM搭載
-- **M5Stack Core（初代/Basic）** — 動作確認済み。CP2104 UART、PSRAM無し
+| デバイス | PSRAM | WAV上限 | カメラ | 備考 |
+|----------|-------|---------|--------|------|
+| M5Stack CoreS3 | あり | 512KB | あり | 推奨。USB CDC |
+| M5Stack Core（初代/Basic） | なし | 80KB | なし | 短い発話向け。CP2104 UART |
+| M5Stack Core2 | あり | 未テスト | なし | |
+
+> **PSRAMなしデバイスの制約**: M5Stack Core（初代）はPSRAMがないため、80KBを超えるWAVデータは受け付けません（HTTP 400 / シリアル `invalid size`）。長い文章は `--pipeline` オプションで分割送信してください。
 
 ## シリアルコマンド
 
@@ -183,7 +188,7 @@ SKILL.md を参照してください。Claude Code や borot 等の AI エージ
 - [PlatformIO](https://platformio.org/) (Arduino framework)
 - [M5Unified](https://github.com/m5stack/M5Unified) — M5Stack デバイス統合ライブラリ
 - [m5stack-avatar](https://github.com/stack-chan/m5stack-avatar) — アバター顔描画ライブラリ
-- [ESP8266Audio](https://github.com/earlephilhower/ESP8266Audio) — 音声再生ライブラリ
+- 自前WAVプレーヤー（M5.Speaker.playRaw ベース、ESP8266Audio不要）
 
 ## 謝辞
 

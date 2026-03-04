@@ -15,10 +15,6 @@
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
-#include <AudioGeneratorWAV.h>
-#include <AudioFileSourceBuffer.h>
-#include <AudioOutputI2S.h>
-#include <SD.h>
 #include <Preferences.h>
 
 Preferences preferences;
@@ -45,44 +41,34 @@ void clearWiFiCredentials();
 // ---- Audio ----
 static constexpr uint8_t m5spk_virtual_channel = 0;
 
-// Custom AudioOutput for M5Speaker (based on robo8080's implementation)
-class AudioOutputM5Speaker : public AudioOutput {
+// Simple WAV player using M5.Speaker.playRaw directly (no ESP8266Audio dependency)
+class SimpleWavPlayer {
 public:
-  AudioOutputM5Speaker(m5::Speaker_Class* speaker, uint8_t virtual_ch = 0) {
-    _speaker = speaker;
-    _virtual_ch = virtual_ch;
-    _tri_index = 0;
-    _tri_filled = 0;
-  }
+  SimpleWavPlayer(m5::Speaker_Class* speaker, uint8_t virtual_ch = 0)
+    : _speaker(speaker), _virtual_ch(virtual_ch), _tri_index(0), _tri_filled(0), _sample_rate(24000) {}
 
-  bool begin() override {
-    _tri_index = 0;
-    _tri_filled = 0;
-    return true;
-  }
+  void setSampleRate(uint32_t rate) { _sample_rate = rate; }
+  uint32_t getSampleRate() const { return _sample_rate; }
 
-  bool ConsumeSample(int16_t sample[2]) override {
-    // Mono mix
-    int16_t mono = (sample[0] + sample[1]) / 2;
-    _tri_buffer[_tri_index][_tri_filled++] = mono;
-
+  // Feed a mono 16-bit sample
+  void feedSample(int16_t sample) {
+    _tri_buffer[_tri_index][_tri_filled++] = sample;
     if (_tri_filled >= TRI_BUF_SIZE) {
       flush();
     }
-    return true;
   }
 
   void flush() {
     if (_tri_filled > 0) {
-      _speaker->playRaw(_tri_buffer[_tri_index], _tri_filled, hertz, false, 1, _virtual_ch);
+      _speaker->playRaw(_tri_buffer[_tri_index], _tri_filled, _sample_rate, false, 1, _virtual_ch);
       _tri_index = (_tri_index + 1) % 3;
       _tri_filled = 0;
     }
   }
 
-  bool stop() override {
-    flush();
-    return true;
+  void reset() {
+    _tri_index = 0;
+    _tri_filled = 0;
   }
 
   // Get current audio level for lip sync
@@ -102,13 +88,51 @@ private:
   int16_t _tri_buffer[3][TRI_BUF_SIZE] = {};
   uint8_t _tri_index;
   size_t _tri_filled;
+  uint32_t _sample_rate;
 };
+
+// WAV header parser
+struct WavHeader {
+  uint16_t channels;
+  uint32_t sample_rate;
+  uint16_t bits_per_sample;
+  uint32_t data_offset;
+  uint32_t data_size;
+  bool valid;
+};
+
+WavHeader parseWavHeader(const uint8_t* data, size_t len) {
+  WavHeader h = {0, 0, 0, 0, 0, false};
+  if (len < 44) return h;
+  // RIFF header
+  if (memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WAVE", 4) != 0) return h;
+
+  // Find fmt chunk
+  size_t pos = 12;
+  while (pos + 8 <= len) {
+    uint32_t chunk_size = data[pos+4] | (data[pos+5]<<8) | (data[pos+6]<<16) | (data[pos+7]<<24);
+    if (memcmp(data + pos, "fmt ", 4) == 0) {
+      if (pos + 8 + chunk_size > len || chunk_size < 16) return h;
+      h.channels = data[pos+10] | (data[pos+11]<<8);
+      h.sample_rate = data[pos+12] | (data[pos+13]<<8) | (data[pos+14]<<16) | (data[pos+15]<<24);
+      h.bits_per_sample = data[pos+22] | (data[pos+23]<<8);
+    } else if (memcmp(data + pos, "data", 4) == 0) {
+      h.data_offset = pos + 8;
+      h.data_size = chunk_size;
+      h.valid = (h.sample_rate > 0 && h.bits_per_sample > 0 && h.channels > 0);
+      return h;
+    }
+    pos += 8 + chunk_size;
+    if (chunk_size & 1) pos++;  // Pad byte
+  }
+  return h;
+}
 
 // ---- Globals ----
 using namespace m5avatar;
 Avatar avatar;
 AsyncWebServer server(80);
-AudioOutputM5Speaker* audioOut = nullptr;
+SimpleWavPlayer* wavPlayer = nullptr;
 bool wifi_connected = false;
 
 // WAV playback queue (ring buffer with 4 slots)
@@ -145,41 +169,6 @@ String getExpressionName(Expression expr) {
     default: return "neutral";
   }
 }
-
-// ---- AudioFileSource from memory buffer ----
-class AudioFileSourceMemory : public AudioFileSource {
-public:
-  AudioFileSourceMemory(const uint8_t* data, size_t len) {
-    _data = data;
-    _len = len;
-    _pos = 0;
-  }
-
-  bool isOpen() override { return _data != nullptr; }
-  bool open(const char* url) override { return false; }
-  bool close() override { _data = nullptr; return true; }
-  uint32_t getSize() override { return _len; }
-  uint32_t getPos() override { return _pos; }
-  bool seek(int32_t pos, int dir) override {
-    if (dir == SEEK_SET) _pos = pos;
-    else if (dir == SEEK_CUR) _pos += pos;
-    else if (dir == SEEK_END) _pos = _len + pos;
-    if (_pos > _len) _pos = _len;
-    return true;
-  }
-  uint32_t read(void* data, uint32_t len) override {
-    uint32_t remain = _len - _pos;
-    uint32_t toRead = (len < remain) ? len : remain;
-    memcpy(data, _data + _pos, toRead);
-    _pos += toRead;
-    return toRead;
-  }
-
-private:
-  const uint8_t* _data;
-  size_t _len;
-  size_t _pos;
-};
 
 // WAV queue helpers
 int wavQueueCount() {
@@ -219,26 +208,37 @@ void wavPlayTask(void* param) {
       slot.len = 0;
       wav_queue_head = (wav_queue_head + 1) % WAV_QUEUE_SIZE;
 
-      AudioFileSourceMemory* src = new AudioFileSourceMemory(data, len);
-      AudioGeneratorWAV* wav = new AudioGeneratorWAV();
+      // Parse WAV header
+      WavHeader hdr = parseWavHeader(data, len);
+      if (hdr.valid && hdr.bits_per_sample == 16) {
+        wavPlayer->setSampleRate(hdr.sample_rate);
+        wavPlayer->reset();
 
-      if (wav->begin(src, audioOut)) {
-        while (wav->isRunning()) {
-          if (!wav->loop()) break;
+        const int16_t* pcm = (const int16_t*)(data + hdr.data_offset);
+        size_t total_samples = hdr.data_size / (hdr.bits_per_sample / 8);
+        size_t step = hdr.channels;  // Skip interleaved channels (take first channel only)
 
-          // Lip sync
-          float level = (float)audioOut->getLevel() / 5000.0f;
-          if (level > 1.0f) level = 1.0f;
-          avatar.setMouthOpenRatio(level);
+        for (size_t i = 0; i < total_samples; i += step) {
+          // Mono mix if stereo
+          if (hdr.channels == 2 && i + 1 < total_samples) {
+            int32_t mix = ((int32_t)pcm[i] + (int32_t)pcm[i+1]) / 2;
+            wavPlayer->feedSample((int16_t)mix);
+          } else {
+            wavPlayer->feedSample(pcm[i]);
+          }
 
-          vTaskDelay(1);
+          // Lip sync (every 640 samples)
+          if ((i / step) % 640 == 639) {
+            float level = (float)wavPlayer->getLevel() / 5000.0f;
+            if (level > 1.0f) level = 1.0f;
+            avatar.setMouthOpenRatio(level);
+            vTaskDelay(1);
+          }
         }
-        wav->stop();
+        wavPlayer->flush();
       }
 
       avatar.setMouthOpenRatio(0.0f);
-      delete wav;
-      delete src;
       free(data);
 
       wav_playing = false;
@@ -684,9 +684,8 @@ void setup() {
   avatar.init();
   avatar.setExpression(Expression::Neutral);
 
-  // Audio output
-  audioOut = new AudioOutputM5Speaker(&M5.Speaker, m5spk_virtual_channel);
-  audioOut->SetRate(24000);  // VOICEVOX default sample rate
+  // Audio output (self-contained WAV player, no ESP8266Audio dependency)
+  wavPlayer = new SimpleWavPlayer(&M5.Speaker, m5spk_virtual_channel);
 
   // Start WAV playback task on core 1 (same as Arduino loop, needed for M5Stack Core speaker)
   xTaskCreatePinnedToCore(wavPlayTask, "wavPlay", 8192, nullptr, 1, nullptr, APP_CPU_NUM);
@@ -731,7 +730,8 @@ void setup() {
     NULL,
     [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
       if (index == 0) {
-        if (total < 44 || total > 512000) return;
+        size_t max_wav = psramFound() ? 512000 : 80000;  // PSRAMなし: 80KB制限
+        if (total < 44 || total > max_wav) return;
         uint8_t* buf = (uint8_t*)(psramFound() ? ps_malloc(total) : malloc(total));
         if (!buf) return;
         request->_tempObject = buf;
