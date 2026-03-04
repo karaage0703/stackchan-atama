@@ -32,11 +32,41 @@ import requests
 import serial
 
 # ---- Defaults ----
-DEFAULT_PORT = "/dev/ttyACM0"
 DEFAULT_BAUD = 921600
 DEFAULT_VOICEVOX_URL = "http://127.0.0.1:50021"
 DEFAULT_VOICEVOX_SPEAKER = 1  # ずんだもん（あまあま）
 DEFAULT_SAMPLE_RATE = 16000  # 16kHz (M5Stackスピーカーには十分)
+
+
+def detect_serial_port():
+    """Auto-detect M5Stack serial port (macOS / Linux)"""
+    import serial.tools.list_ports
+
+    # ESP32-S3 (CoreS3): VID=303A PID=1001
+    # CP2104 (Core/Core2): VID=10C4 PID=EA60
+    # CH9102/CH340 (Core/Core2): VID=1A86 PID=55D4 or 7523
+    known_vids = {0x303A, 0x10C4, 0x1A86}
+
+    for port_info in serial.tools.list_ports.comports():
+        if port_info.vid in known_vids:
+            return port_info.device
+
+    # Fallback: platform-specific common names
+    import glob
+    import platform
+
+    if platform.system() == "Darwin":
+        candidates = glob.glob("/dev/cu.usbmodem*") + glob.glob("/dev/cu.usbserial*")
+    else:
+        candidates = glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")
+
+    if candidates:
+        return candidates[0]
+
+    return "/dev/ttyACM0"  # ultimate fallback
+
+
+DEFAULT_PORT = detect_serial_port()
 
 
 # ---- Serial communication ----
@@ -182,7 +212,20 @@ def split_text(text):
 
 
 # ---- Commands ----
+def check_voicevox(url):
+    """Check if VOICEVOX Engine is running"""
+    try:
+        resp = requests.get(f"{url}/version", timeout=2)
+        resp.raise_for_status()
+        return True
+    except (requests.ConnectionError, requests.Timeout):
+        print(f"Error: VOICEVOX Engine is not running at {url}", file=sys.stderr)
+        print("Please start VOICEVOX before using the 'say' command.", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_say(args):
+    check_voicevox(args.voicevox_url)
     sc = StackchanSerial(args.port, args.baud)
     sc.open()
 
