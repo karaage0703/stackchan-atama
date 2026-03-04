@@ -2,16 +2,22 @@
 """
 stackchan-atama controller
 
-USB シリアル経由でスタックチャン（アタマのみ版）を制御。
+USB シリアルまたは WiFi HTTP API 経由でスタックチャン（アタマのみ版）を制御。
 ローカルVOICEVOXで音声合成してWAVをスタックチャンに送信。
 パイプライン再生対応（文を分割して順次送信、最初のチャンクを即座に再生開始）。
 
 Usage:
+    # USB Serial (default)
     uv run stackchan_atama.py say "こんにちは"
     uv run stackchan_atama.py say "長い文章。複数に分割されます。" --pipeline
     uv run stackchan_atama.py face happy
     uv run stackchan_atama.py status
-    uv run stackchan_atama.py volume 200
+    uv run stackchan_atama.py capture -o photo.jpg
+
+    # WiFi HTTP API
+    uv run stackchan_atama.py --wifi say "こんにちは"
+    uv run stackchan_atama.py --wifi --host 192.168.1.9 face happy
+    uv run stackchan_atama.py --wifi capture -o photo.jpg
 """
 # /// script
 # requires-python = ">=3.10"
@@ -21,6 +27,7 @@ Usage:
 import argparse
 import base64
 import json
+import os
 import re
 import sys
 import time
@@ -36,6 +43,7 @@ DEFAULT_BAUD = 921600
 DEFAULT_VOICEVOX_URL = "http://127.0.0.1:50021"
 DEFAULT_VOICEVOX_SPEAKER = 1  # ずんだもん（あまあま）
 DEFAULT_SAMPLE_RATE = 16000  # 16kHz (M5Stackスピーカーには十分)
+DEFAULT_WIFI_HOST = os.environ.get("STACKCHAN_IP", "192.168.1.9")
 
 
 def detect_serial_port():
@@ -188,6 +196,92 @@ class StackchanSerial:
         return jpg_data, header
 
 
+# ---- WiFi HTTP communication ----
+class StackchanHTTP:
+    """WiFi HTTP API interface to stackchan-atama"""
+
+    FACE_MAP = {
+        "neutral": "neutral", "normal": "neutral",
+        "happy": "happy", "sleepy": "sleepy",
+        "doubt": "doubt", "sad": "sad", "angry": "angry",
+    }
+
+    def __init__(self, host=DEFAULT_WIFI_HOST):
+        self.host = host
+        self.base_url = f"http://{host}"
+
+    def open(self):
+        pass  # no persistent connection needed
+
+    def close(self):
+        pass
+
+    def send_command(self, cmd):
+        """Translate serial-style command to HTTP request"""
+        try:
+            if cmd == "STATUS":
+                resp = requests.get(f"{self.base_url}/status", timeout=5)
+                resp.raise_for_status()
+                return resp.json()
+            elif cmd.startswith("FACE:"):
+                expr = cmd.split(":", 1)[1]
+                mapped = self.FACE_MAP.get(expr.lower(), expr)
+                resp = requests.get(f"{self.base_url}/face", params={"expression": mapped}, timeout=5)
+                resp.raise_for_status()
+                return resp.json()
+            elif cmd.startswith("VOLUME:"):
+                level = cmd.split(":", 1)[1]
+                resp = requests.get(f"{self.base_url}/setting", params={"volume": level}, timeout=5)
+                resp.raise_for_status()
+                return resp.json()
+            else:
+                return {"status": "error", "error": f"unsupported WiFi command: {cmd}"}
+        except requests.ConnectionError:
+            return {"status": "error", "error": f"cannot connect to {self.base_url}"}
+        except requests.Timeout:
+            return {"status": "error", "error": "request timeout"}
+
+    def send_wav(self, wav_data):
+        """Send WAV binary via HTTP POST"""
+        try:
+            resp = requests.post(
+                f"{self.base_url}/play_wav",
+                data=wav_data,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except requests.HTTPError as e:
+            return {"status": "error", "error": e.response.text if e.response else str(e)}
+        except requests.ConnectionError:
+            return {"status": "error", "error": f"cannot connect to {self.base_url}"}
+        except requests.Timeout:
+            return {"status": "error", "error": "send timeout"}
+
+    def capture(self):
+        """Capture JPEG image via HTTP GET"""
+        try:
+            resp = requests.get(f"{self.base_url}/capture", timeout=15)
+            resp.raise_for_status()
+            return resp.content, {"status": "ok", "size": len(resp.content)}
+        except requests.HTTPError as e:
+            return None, {"status": "error", "error": e.response.text if e.response else str(e)}
+        except requests.ConnectionError:
+            return None, {"status": "error", "error": f"cannot connect to {self.base_url}"}
+        except requests.Timeout:
+            return None, {"status": "error", "error": "capture timeout"}
+
+
+# ---- Backend selection ----
+def get_backend(args):
+    """Create the appropriate backend based on --wifi flag"""
+    if args.wifi:
+        return StackchanHTTP(args.host)
+    else:
+        return StackchanSerial(args.port, args.baud)
+
+
 # ---- VOICEVOX ----
 def voicevox_synthesize(text, voicevox_url=DEFAULT_VOICEVOX_URL, speaker=DEFAULT_VOICEVOX_SPEAKER, sample_rate=DEFAULT_SAMPLE_RATE):
     """Generate WAV from text using VOICEVOX"""
@@ -226,7 +320,7 @@ def check_voicevox(url):
 
 def cmd_say(args):
     check_voicevox(args.voicevox_url)
-    sc = StackchanSerial(args.port, args.baud)
+    sc = get_backend(args)
     sc.open()
 
     if args.pipeline:
@@ -267,7 +361,7 @@ def cmd_say(args):
 
 
 def cmd_face(args):
-    sc = StackchanSerial(args.port, args.baud)
+    sc = get_backend(args)
     sc.open()
     result = sc.send_command(f"FACE:{args.expression}")
     print(json.dumps(result, ensure_ascii=False))
@@ -275,7 +369,7 @@ def cmd_face(args):
 
 
 def cmd_status(args):
-    sc = StackchanSerial(args.port, args.baud)
+    sc = get_backend(args)
     sc.open()
     result = sc.send_command("STATUS")
     print(json.dumps(result, ensure_ascii=False))
@@ -283,7 +377,7 @@ def cmd_status(args):
 
 
 def cmd_volume(args):
-    sc = StackchanSerial(args.port, args.baud)
+    sc = get_backend(args)
     sc.open()
     result = sc.send_command(f"VOLUME:{args.level}")
     print(json.dumps(result, ensure_ascii=False))
@@ -306,7 +400,7 @@ def cmd_wifi(args):
 
 
 def cmd_capture(args):
-    sc = StackchanSerial(args.port, args.baud)
+    sc = get_backend(args)
     sc.open()
     jpg_data, info = sc.capture()
     sc.close()
@@ -321,10 +415,30 @@ def cmd_capture(args):
     print(json.dumps({"status": "ok", "file": output, "size": len(jpg_data)}, ensure_ascii=False))
 
 
+def cmd_play(args):
+    """Play a WAV file directly"""
+    wav_path = Path(args.file)
+    if not wav_path.exists():
+        print(json.dumps({"status": "error", "error": f"file not found: {args.file}"}), file=sys.stderr)
+        sys.exit(1)
+
+    wav_data = wav_path.read_bytes()
+    sc = get_backend(args)
+    sc.open()
+    result = sc.send_wav(wav_data)
+    sc.close()
+
+    result["file"] = args.file
+    result["size"] = len(wav_data)
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def main():
     parser = argparse.ArgumentParser(description="stackchan-atama controller")
-    parser.add_argument("--port", default=DEFAULT_PORT, help="Serial port (default: /dev/ttyACM0)")
+    parser.add_argument("--port", default=DEFAULT_PORT, help=f"Serial port (default: {DEFAULT_PORT})")
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUD, help="Baud rate (default: 921600)")
+    parser.add_argument("--wifi", action="store_true", help="Use WiFi HTTP API instead of USB serial")
+    parser.add_argument("--host", default=DEFAULT_WIFI_HOST, help=f"WiFi host IP (default: {DEFAULT_WIFI_HOST}, env: STACKCHAN_IP)")
     parser.add_argument("--voicevox-url", default=DEFAULT_VOICEVOX_URL, help="VOICEVOX Engine URL")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -346,15 +460,19 @@ def main():
     p_volume.add_argument("level", type=int, help="Volume level (0-255)")
     p_volume.set_defaults(func=cmd_volume)
 
-    p_wifi = sub.add_parser("wifi", help="Set or clear WiFi credentials (saved to NVS)")
-    p_wifi.add_argument("--ssid", help="WiFi SSID")
-    p_wifi.add_argument("--password", default="", help="WiFi password")
-    p_wifi.add_argument("--clear", action="store_true", help="Clear saved WiFi credentials")
-    p_wifi.set_defaults(func=cmd_wifi)
+    p_wifi_cfg = sub.add_parser("wifi-config", help="Set or clear WiFi credentials via serial (saved to NVS)")
+    p_wifi_cfg.add_argument("--ssid", help="WiFi SSID")
+    p_wifi_cfg.add_argument("--password", default="", help="WiFi password")
+    p_wifi_cfg.add_argument("--clear", action="store_true", help="Clear saved WiFi credentials")
+    p_wifi_cfg.set_defaults(func=cmd_wifi)
 
     p_capture = sub.add_parser("capture", help="Capture image from camera (CoreS3 only)")
     p_capture.add_argument("-o", "--output", default=None, help="Output file (default: capture.jpg)")
     p_capture.set_defaults(func=cmd_capture)
+
+    p_play = sub.add_parser("play", help="Play a WAV file directly")
+    p_play.add_argument("file", help="WAV file path")
+    p_play.set_defaults(func=cmd_play)
 
     args = parser.parse_args()
     args.func(args)
