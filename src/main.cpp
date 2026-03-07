@@ -258,6 +258,7 @@ void handleStatus(AsyncWebServerRequest *request) {
   doc["ip"] = WiFi.localIP().toString();
   doc["playing"] = wav_playing;
   doc["queued"] = wavQueueCount();
+  doc["psram"] = psramFound();
 
   String json;
   serializeJson(doc, json);
@@ -374,18 +375,20 @@ void handleSerialCommand(const String& cmd) {
 
   } else if (cmd == "STATUS") {
 #if defined(ENABLE_CAMERA)
-    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":%s}\n",
+    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":%s,\"psram\":%s}\n",
       wifi_connected ? "true" : "false",
       wifi_connected ? WiFi.localIP().toString().c_str() : "none",
       wav_playing ? "true" : "false",
       wavQueueCount(),
-      camera_initialized ? "true" : "false");
+      camera_initialized ? "true" : "false",
+      psramFound() ? "true" : "false");
 #else
-    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":false}\n",
+    Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":false,\"psram\":%s}\n",
       wifi_connected ? "true" : "false",
       wifi_connected ? WiFi.localIP().toString().c_str() : "none",
       wav_playing ? "true" : "false",
-      wavQueueCount());
+      wavQueueCount(),
+      psramFound() ? "true" : "false");
 #endif
 
   } else if (cmd == "WIFI:CLEAR") {

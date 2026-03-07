@@ -117,7 +117,7 @@ class StackchanSerial:
         except json.JSONDecodeError:
             return {"raw": response}
 
-    def send_wav(self, wav_data):
+    def send_wav(self, wav_data, chunk_size=1024, chunk_delay=0.005):
         """Send WAV binary data with flow control"""
         self.ser.write(f"WAV:{len(wav_data)}\n".encode())
         self.ser.flush()
@@ -135,14 +135,13 @@ class StackchanSerial:
         if not ready:
             return {"status": "error", "error": "no READY response"}
 
-        # Send in 1KB chunks with 5ms delay
-        CHUNK = 1024
+        # Send in chunks
         sent = 0
         while sent < len(wav_data):
-            end = min(sent + CHUNK, len(wav_data))
+            end = min(sent + chunk_size, len(wav_data))
             self.ser.write(wav_data[sent:end])
             sent = end
-            time.sleep(0.005)
+            time.sleep(chunk_delay)
         self.ser.flush()
 
         # Wait for OK response
@@ -402,14 +401,20 @@ def cmd_say(args):
                 break
             i, chunk, wav, tts_time = item
             t0 = time.time()
-            result = sc.send_wav(wav)
+            if isinstance(sc, StackchanSerial):
+                result = sc.send_wav(wav, chunk_size=args.serial_chunk, chunk_delay=args.serial_delay)
+            else:
+                result = sc.send_wav(wav)
             send_time = time.time() - t0
             print(f"  [{i+1}/{len(chunks)}] TTS:{tts_time:.2f}s Send:{send_time:.2f}s ({len(wav)}B) {chunk}", file=sys.stderr)
 
         executor.shutdown(wait=False)
     else:
         wav = synthesize(args.text, args)
-        result = sc.send_wav(wav)
+        if isinstance(sc, StackchanSerial):
+            result = sc.send_wav(wav, chunk_size=args.serial_chunk, chunk_delay=args.serial_delay)
+        else:
+            result = sc.send_wav(wav)
         result["text"] = args.text
         result["wav_size"] = len(wav)
         result["tts"] = args.tts
@@ -506,6 +511,10 @@ def main():
                         help="Path to piper .onnx model file (env: PIPER_MODEL)")
     parser.add_argument("--piper-speaker", type=int, default=0,
                         help="Piper speaker ID for multi-speaker models (default: 0)")
+    parser.add_argument("--serial-chunk", type=int, default=1024,
+                        help="Serial transfer chunk size in bytes (default: 1024, try 256 if transfer fails)")
+    parser.add_argument("--serial-delay", type=float, default=0.005,
+                        help="Delay between serial chunks in seconds (default: 0.005, try 0.02 if transfer fails)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_say = sub.add_parser("say", help="Speak text via TTS (VOICEVOX or piper)")
