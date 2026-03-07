@@ -222,6 +222,16 @@ uv run tools/stackchan_atama.py --wifi capture -o /tmp/photo.jpg
 - **VOICEVOX接続エラー**: `docker ps` でコンテナ起動確認、または `curl http://localhost:50021/version` で疎通確認
 - **音が鳴らない**: `uv run tools/stackchan_atama.py volume 255` で最大音量に設定
 - **シリアルポートが掴まれている**: `lsof /dev/ttyACM0` で確認、`fuser -k /dev/ttyACM0` で解放
+- **シリアルでWAV転送が失敗する（`no READY response` / `no confirmation received`）**:
+  ホストPCの性能やUSBコントローラの特性により、デフォルトの転送速度（1KB/5ms）が速すぎる場合がある。
+  まずデフォルトで `say` を試し、失敗したら `--serial-chunk` と `--serial-delay` で速度を落とす：
+  ```bash
+  # デフォルト（高速ホスト向け）
+  uv run tools/stackchan_atama.py say "テスト"
+
+  # 転送が失敗する場合（Raspberry Pi等の低速ホスト向け）
+  uv run tools/stackchan_atama.py --serial-chunk 256 --serial-delay 0.02 say "テスト"
+  ```
 
 ## 使用例
 
