@@ -62,11 +62,20 @@ pio run -e m5stack-core -t upload
 
 ### 共通要件
 
+TTSエンジンが必要（どちらか一方でOK）：
+
+#### VOICEVOX（デフォルト）
 - VOICEVOX Engine がローカルで起動していること（port 50021）
   - Dockerで起動: `docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest`
   - macOSでは `open -a VOICEVOX` でも起動可能
   - 確認: `curl http://localhost:50021/version`
   - 起動していない場合、`say` コマンドはエラーメッセージを表示して終了する
+
+#### piper-plus（VOICEVOX不要、Raspberry Pi対応）
+- [piper-plus](https://github.com/ayutaz/piper-plus) のバイナリとモデルファイルが必要
+- サーバー不要、バイナリ単体で動作。ARM64（Raspberry Pi / DGX Spark）対応
+- 日本語モデル例: `ayousanz/piper-plus-tsukuyomi-chan`（HuggingFace）
+- `--tts piper --piper-bin <path> --piper-model <path>` で指定
 
 ## 対応デバイス
 
@@ -103,11 +112,18 @@ cd [SKILL_DIR] && uv run tools/stackchan_atama.py say "おはよう" --voice 3
 
 # WiFi経由
 cd [SKILL_DIR] && uv run tools/stackchan_atama.py --wifi say "こんにちは" --pipeline
+
+# piper-plus でオフライン音声合成（VOICEVOX 不要、Raspberry Pi 対応）
+cd [SKILL_DIR] && uv run tools/stackchan_atama.py --tts piper \
+  --piper-bin /path/to/piper \
+  --piper-model /path/to/model.onnx \
+  say "こんにちは" --pipeline
 ```
 
-- VOICEVOX ローカルエンジン経由
+- デフォルト: VOICEVOX ローカルエンジン経由
+- `--tts piper` で piper-plus に切替（サーバー不要、ARM64対応）
 - `--pipeline` で句読点区切り＋順次送信（長文推奨）
-- `--voice` で話者ID変更（デフォルト: 1 = ずんだもん）
+- `--voice` で話者ID変更（デフォルト: 1 = ずんだもん、VOICEVOX時のみ）
 
 ### Step 3: 表情変更
 
