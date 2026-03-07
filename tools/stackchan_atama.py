@@ -135,14 +135,14 @@ class StackchanSerial:
         if not ready:
             return {"status": "error", "error": "no READY response"}
 
-        # Send in 1KB chunks with 5ms delay
-        CHUNK = 1024
+        # Send in 256B chunks with 20ms delay (Core without PSRAM needs slower transfer)
+        CHUNK = 256
         sent = 0
         while sent < len(wav_data):
             end = min(sent + CHUNK, len(wav_data))
             self.ser.write(wav_data[sent:end])
             sent = end
-            time.sleep(0.005)
+            time.sleep(0.02)
         self.ser.flush()
 
         # Wait for OK response
