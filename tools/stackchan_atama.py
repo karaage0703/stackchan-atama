@@ -401,14 +401,20 @@ def cmd_say(args):
                 break
             i, chunk, wav, tts_time = item
             t0 = time.time()
-            result = sc.send_wav(wav, chunk_size=args.serial_chunk, chunk_delay=args.serial_delay)
+            if isinstance(sc, StackchanSerial):
+                result = sc.send_wav(wav, chunk_size=args.serial_chunk, chunk_delay=args.serial_delay)
+            else:
+                result = sc.send_wav(wav)
             send_time = time.time() - t0
             print(f"  [{i+1}/{len(chunks)}] TTS:{tts_time:.2f}s Send:{send_time:.2f}s ({len(wav)}B) {chunk}", file=sys.stderr)
 
         executor.shutdown(wait=False)
     else:
         wav = synthesize(args.text, args)
-        result = sc.send_wav(wav, chunk_size=args.serial_chunk, chunk_delay=args.serial_delay)
+        if isinstance(sc, StackchanSerial):
+            result = sc.send_wav(wav, chunk_size=args.serial_chunk, chunk_delay=args.serial_delay)
+        else:
+            result = sc.send_wav(wav)
         result["text"] = args.text
         result["wav_size"] = len(wav)
         result["tts"] = args.tts
