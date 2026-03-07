@@ -35,6 +35,9 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
 
+import subprocess
+import tempfile
+
 import requests
 import serial
 
@@ -44,6 +47,9 @@ DEFAULT_VOICEVOX_URL = "http://127.0.0.1:50021"
 DEFAULT_VOICEVOX_SPEAKER = 1  # ずんだもん（あまあま）
 DEFAULT_SAMPLE_RATE = 16000  # 16kHz (M5Stackスピーカーには十分)
 DEFAULT_WIFI_HOST = os.environ.get("STACKCHAN_IP", "192.168.1.9")
+DEFAULT_TTS = "voicevox"  # "voicevox" or "piper"
+DEFAULT_PIPER_BIN = os.environ.get("PIPER_BIN", "piper")
+DEFAULT_PIPER_MODEL = os.environ.get("PIPER_MODEL", "")
 
 
 def detect_serial_port():
@@ -296,6 +302,44 @@ def voicevox_synthesize(text, voicevox_url=DEFAULT_VOICEVOX_URL, speaker=DEFAULT
     return resp.content
 
 
+def piper_synthesize(text, piper_bin=DEFAULT_PIPER_BIN, model=DEFAULT_PIPER_MODEL, speaker=0):
+    """Generate WAV from text using piper-plus (local, no server required)"""
+    if not model:
+        raise RuntimeError("--piper-model is required when using --tts piper")
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        out_path = f.name
+
+    cmd = [piper_bin, "--model", model, "-f", out_path]
+    if speaker:
+        cmd += ["--speaker", str(speaker)]
+
+    # Auto-detect config file (piper expects model.onnx.json, but some models use config.json)
+    model_path = Path(model)
+    default_config = model_path.with_suffix(model_path.suffix + ".json")
+    alt_config = model_path.parent / "config.json"
+    if not default_config.exists() and alt_config.exists():
+        cmd += ["--config", str(alt_config)]
+
+    # Set OPENJTALK_PHONEMIZER_PATH if piper binary is in a known directory
+    env = os.environ.copy()
+    piper_dir = str(Path(piper_bin).parent)
+    phonemizer = os.path.join(piper_dir, "open_jtalk_phonemizer")
+    if os.path.isfile(phonemizer) and "OPENJTALK_PHONEMIZER_PATH" not in env:
+        env["OPENJTALK_PHONEMIZER_PATH"] = phonemizer
+
+    result = subprocess.run(
+        cmd, input=text.encode("utf-8"), capture_output=True, env=env, timeout=30,
+    )
+    if result.returncode != 0:
+        os.unlink(out_path)
+        raise RuntimeError(f"piper failed: {result.stderr.decode('utf-8', errors='replace')}")
+
+    wav_data = Path(out_path).read_bytes()
+    os.unlink(out_path)
+    return wav_data
+
+
 def split_text(text):
     """Split text at Japanese/English punctuation for pipeline playback"""
     parts = re.split(r"(?<=[。！？!?])", text)
@@ -318,20 +362,33 @@ def check_voicevox(url):
         sys.exit(1)
 
 
+def synthesize(text, args):
+    """Generate WAV from text using the selected TTS engine"""
+    if args.tts == "piper":
+        return piper_synthesize(text, args.piper_bin, args.piper_model, args.piper_speaker)
+    else:
+        return voicevox_synthesize(text, args.voicevox_url, args.voice, args.sample_rate)
+
+
 def cmd_say(args):
-    check_voicevox(args.voicevox_url)
+    if args.tts == "voicevox":
+        check_voicevox(args.voicevox_url)
+    elif args.tts == "piper" and not args.piper_model:
+        print("Error: --piper-model is required when using --tts piper", file=sys.stderr)
+        sys.exit(1)
+
     sc = get_backend(args)
     sc.open()
 
     if args.pipeline:
         chunks = split_text(args.text)
-        print(f"Pipeline: {len(chunks)} chunks", file=sys.stderr)
+        print(f"Pipeline ({args.tts}): {len(chunks)} chunks", file=sys.stderr)
         wav_queue = Queue(maxsize=4)
 
         def tts_worker():
             for i, chunk in enumerate(chunks):
                 t0 = time.time()
-                wav = voicevox_synthesize(chunk, args.voicevox_url, args.voice, args.sample_rate)
+                wav = synthesize(chunk, args)
                 tts_time = time.time() - t0
                 wav_queue.put((i, chunk, wav, tts_time))
             wav_queue.put(None)  # sentinel
@@ -351,10 +408,11 @@ def cmd_say(args):
 
         executor.shutdown(wait=False)
     else:
-        wav = voicevox_synthesize(args.text, args.voicevox_url, args.voice, args.sample_rate)
+        wav = synthesize(args.text, args)
         result = sc.send_wav(wav)
         result["text"] = args.text
         result["wav_size"] = len(wav)
+        result["tts"] = args.tts
         print(json.dumps(result, ensure_ascii=False))
 
     sc.close()
@@ -440,9 +498,17 @@ def main():
     parser.add_argument("--wifi", action="store_true", help="Use WiFi HTTP API instead of USB serial")
     parser.add_argument("--host", default=DEFAULT_WIFI_HOST, help=f"WiFi host IP (default: {DEFAULT_WIFI_HOST}, env: STACKCHAN_IP)")
     parser.add_argument("--voicevox-url", default=DEFAULT_VOICEVOX_URL, help="VOICEVOX Engine URL")
+    parser.add_argument("--tts", choices=["voicevox", "piper"], default=DEFAULT_TTS,
+                        help="TTS engine (default: voicevox)")
+    parser.add_argument("--piper-bin", default=DEFAULT_PIPER_BIN,
+                        help="Path to piper binary (default: piper, env: PIPER_BIN)")
+    parser.add_argument("--piper-model", default=DEFAULT_PIPER_MODEL,
+                        help="Path to piper .onnx model file (env: PIPER_MODEL)")
+    parser.add_argument("--piper-speaker", type=int, default=0,
+                        help="Piper speaker ID for multi-speaker models (default: 0)")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_say = sub.add_parser("say", help="Speak text via VOICEVOX")
+    p_say = sub.add_parser("say", help="Speak text via TTS (VOICEVOX or piper)")
     p_say.add_argument("text", help="Text to speak")
     p_say.add_argument("--voice", type=int, default=DEFAULT_VOICEVOX_SPEAKER, help="VOICEVOX speaker ID")
     p_say.add_argument("--pipeline", action="store_true", help="Split text for faster first response")

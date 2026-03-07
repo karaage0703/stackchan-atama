@@ -123,6 +123,12 @@ uv run stackchan_atama.py volume 200
 # 話者変更
 uv run stackchan_atama.py say "おはよう" --voice 3
 
+# piper-plus でオフライン音声合成（VOICEVOX 不要、Raspberry Pi 対応）
+uv run stackchan_atama.py --tts piper \
+  --piper-bin /path/to/piper \
+  --piper-model /path/to/model.onnx \
+  say "こんにちは"
+
 # WiFi 設定（NVS に保存される）
 uv run stackchan_atama.py wifi --ssid MySSID --password MyPassword
 
