@@ -374,6 +374,24 @@ void handleSerialCommand(const String& cmd) {
     Serial.printf("{\"status\":\"ok\",\"volume\":%d}\n", M5.Speaker.getChannelVolume(m5spk_virtual_channel));
 
   } else if (cmd == "STATUS") {
+#ifdef ARDUINO_M5STACK_ATOMS3R
+#if defined(ENABLE_CAMERA)
+    Serial.printf("{\"status\":\"online\",\"board\":\"AtomS3R+Echo\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":%s,\"psram\":%s}\n",
+      wifi_connected ? "true" : "false",
+      wifi_connected ? WiFi.localIP().toString().c_str() : "none",
+      wav_playing ? "true" : "false",
+      wavQueueCount(),
+      camera_initialized ? "true" : "false",
+      psramFound() ? "true" : "false");
+#else
+    Serial.printf("{\"status\":\"online\",\"board\":\"AtomS3R+Echo\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":false,\"psram\":%s}\n",
+      wifi_connected ? "true" : "false",
+      wifi_connected ? WiFi.localIP().toString().c_str() : "none",
+      wav_playing ? "true" : "false",
+      wavQueueCount(),
+      psramFound() ? "true" : "false");
+#endif
+#else
 #if defined(ENABLE_CAMERA)
     Serial.printf("{\"status\":\"online\",\"wifi\":%s,\"ip\":\"%s\",\"playing\":%s,\"queued\":%d,\"camera\":%s,\"psram\":%s}\n",
       wifi_connected ? "true" : "false",
@@ -389,6 +407,7 @@ void handleSerialCommand(const String& cmd) {
       wav_playing ? "true" : "false",
       wavQueueCount(),
       psramFound() ? "true" : "false");
+#endif
 #endif
 
   } else if (cmd == "WIFI:CLEAR") {
@@ -660,7 +679,13 @@ void setupWiFi() {
 // ---- Setup ----
 void setup() {
   auto cfg = M5.config();
+#ifdef ARDUINO_M5STACK_ATOMS3R
+  // AtomS3R with Atomic Echo Base configuration
+  cfg.external_speaker.atomic_echo = true;
+#else
+  // Default configuration (CoreS3, Core2, etc.)
   cfg.external_spk = true;
+#endif
   M5.begin(cfg);
 
   // Re-init Serial after M5.begin() for USB CDC on ESP32-S3
@@ -669,7 +694,12 @@ void setup() {
 #else
   Serial.setRxBufferSize(4096);   // 4KB receive buffer (ESP32 classic)
 #endif
-  Serial.begin(921600);
+
+#ifdef ARDUINO_M5STACK_ATOMS3R
+  Serial.begin(115200);  // Optimized for AtomS3R
+#else
+  Serial.begin(921600);  // Default for CoreS3/Core2
+#endif
   delay(500);
 
   // Speaker config
@@ -679,12 +709,27 @@ void setup() {
     spk_cfg.dma_buf_count = 20;
     spk_cfg.dma_buf_len = 512;
     M5.Speaker.config(spk_cfg);
-    M5.Speaker.setVolume(255);  // Master volume max
+#ifdef ARDUINO_M5STACK_ATOMS3R
+    // Atomic Echo Base: use lower volume to prevent distortion
+    M5.Speaker.setVolume(192);
+    M5.Speaker.setChannelVolume(m5spk_virtual_channel, 192);
+#else
+    // Default: maximum volume
+    M5.Speaker.setVolume(255);
     M5.Speaker.setChannelVolume(m5spk_virtual_channel, 255);
+#endif
   }
 
   // Start avatar
+#ifdef ARDUINO_M5STACK_ATOMS3R
+  // AtomS3R: Initialize avatar for headless operation (no display)
+  avatar.setScale(0.5);
+  avatar.setPosition(-56, -96);
+  avatar.init();  // Avatar library auto-detects no display and uses appropriate size
+#else
+  // M5Stack devices: Use default initialization with display
   avatar.init();
+#endif
   avatar.setExpression(Expression::Neutral);
 
   // Audio output (self-contained WAV player, no ESP8266Audio dependency)
@@ -757,7 +802,11 @@ void setup() {
   camera_initialized = setupCamera();
 #endif
 
+#ifdef ARDUINO_M5STACK_ATOMS3R
+  Serial.println("[AtomS3R+Echo] Serial commands ready: FACE:expr WAV:size VOLUME:vol STATUS WIFI:ssid:pass CAPTURE");
+#else
   Serial.println("Serial commands ready: FACE:expr WAV:size VOLUME:vol STATUS WIFI:ssid:pass CAPTURE");
+#endif
 }
 
 // ---- Loop ----
