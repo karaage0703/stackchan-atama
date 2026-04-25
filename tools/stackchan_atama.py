@@ -16,7 +16,7 @@ Usage:
 
     # WiFi HTTP API
     uv run stackchan_atama.py --wifi say "こんにちは"
-    uv run stackchan_atama.py --wifi --host 192.168.1.9 face happy
+    uv run stackchan_atama.py --wifi --host $STACKCHAN_IP face happy
     uv run stackchan_atama.py --wifi capture -o photo.jpg
 """
 # /// script
@@ -46,10 +46,23 @@ DEFAULT_BAUD = 921600
 DEFAULT_VOICEVOX_URL = "http://127.0.0.1:50021"
 DEFAULT_VOICEVOX_SPEAKER = 1  # ずんだもん（あまあま）
 DEFAULT_SAMPLE_RATE = 16000  # 16kHz (M5Stackスピーカーには十分)
-DEFAULT_WIFI_HOST = os.environ.get("STACKCHAN_IP", "192.168.1.9")
-DEFAULT_TTS = "voicevox"  # "voicevox" or "piper"
-DEFAULT_PIPER_BIN = os.environ.get("PIPER_BIN", "piper")
-DEFAULT_PIPER_MODEL = os.environ.get("PIPER_MODEL", "")
+DEFAULT_WIFI_HOST = os.environ.get("STACKCHAN_IP", "192.168.1.100")
+DEFAULT_TTS = os.environ.get("STACKCHAN_TTS", "piper")  # "voicevox" or "piper"
+
+# piper-plus: auto-detect from skill directory (tools/piper, models/*.onnx)
+_SCRIPT_DIR = Path(__file__).resolve().parent  # tools/
+_SKILL_DIR = _SCRIPT_DIR.parent               # stackchan-atama/
+_LOCAL_PIPER_BIN = _SCRIPT_DIR / "piper"
+_LOCAL_PIPER_MODELS = sorted(_SKILL_DIR.glob("models/*.onnx"))
+
+DEFAULT_PIPER_BIN = os.environ.get(
+    "PIPER_BIN",
+    str(_LOCAL_PIPER_BIN) if _LOCAL_PIPER_BIN.exists() else "piper"
+)
+DEFAULT_PIPER_MODEL = os.environ.get(
+    "PIPER_MODEL",
+    str(_LOCAL_PIPER_MODELS[0]) if _LOCAL_PIPER_MODELS else ""
+)
 
 
 def detect_serial_port():

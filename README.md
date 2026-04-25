@@ -9,8 +9,19 @@
 - **USB シリアルで PC から制御**（WiFi 不要）
 - PC から WAV データを送信 → スピーカー再生 + 口パク
 - 表情変更（happy, sad, angry, sleepy, doubt, neutral）
-- TTS は PC 側で自由に選択（ローカル VOICEVOX 等）
+- TTS は PC 側で自由に選択（piper-plus / VOICEVOX 等）
 - パイプライン再生対応（文を分割して順次送信、最初のチャンクを即座に再生開始）
+
+### 通常のスタックチャンとの違い
+
+- **stackchan（既存）**: WiFi HTTP API、AI_StackChan2ファームウェア、サーボ付き
+- **stackchan-atama（本プロジェクト）**: USBシリアル or WiFi、専用ファームウェア、アタマだけ（サーボなし）
+
+### スキル構成
+
+- `tools/stackchan_atama.py` - 制御CLI（pyserial + requests）
+- `src/main.cpp` - M5Stack用ファームウェア（PlatformIO）
+- `platformio.ini` - ビルド設定（CoreS3 / Core / Core2）
 
 ## 動作確認済みデバイス
 
@@ -63,7 +74,9 @@ WiFi 接続時は HTTP API も使用可能：
 - M5Stack Core / Core2 / CoreS3 のいずれか
 - USB-C ケーブル
 - [PlatformIO CLI](https://docs.platformio.org/en/stable/core/installation.html)（`uv tool install platformio` でもOK）
-- [VOICEVOX Engine](https://voicevox.hiroshiba.jp/)（音声合成用、PC 側で起動）
+- TTS エンジン（以下のいずれか）:
+  - [piper-plus](https://github.com/ayutaz/piper-plus)（デフォルト。サーバー不要、ARM64対応）
+  - [VOICEVOX Engine](https://voicevox.hiroshiba.jp/)（`--tts voicevox` で切替）
 
 ### ビルド & 書き込み
 
@@ -142,17 +155,49 @@ uv run stackchan_atama.py capture -o photo.jpg
 uv run stackchan_atama.py --port /dev/ttyACM1 status
 ```
 
-### VOICEVOX Engine の起動
+### TTS エンジンの設定
 
-PC 側で VOICEVOX Engine が動いている必要があります：
+デフォルトは piper-plus。環境変数 `STACKCHAN_TTS` で切替可能。
+
+#### piper-plus（デフォルト）
+
+サーバー不要、バイナリ単体で動作。ARM64（Raspberry Pi / DGX Spark）対応。
+
+スクリプトは `tools/piper`（バイナリ）と `models/*.onnx`（モデル）を自動検出します。
+シンボリックリンクまたはコピーで配置してください：
 
 ```bash
-# Docker
+# piper-plus バイナリ
+ln -s /path/to/piper-plus/piper/bin/piper tools/piper
+
+# モデルファイル + config
+mkdir -p models
+ln -s /path/to/piper-plus/models/tsukuyomi-chan-6lang-fp16.onnx models/
+ln -s /path/to/piper-plus/models/config.json models/
+```
+
+環境変数 `PIPER_BIN` / `PIPER_MODEL` での指定も可能（自動検出より優先）。
+
+#### VOICEVOX（オプション）
+
+```bash
+export STACKCHAN_TTS=voicevox
+
+# Docker で起動
 docker run --rm -p 50021:50021 voicevox/voicevox_engine:cpu-latest
 
-# または直接インストール
-# https://voicevox.hiroshiba.jp/ からダウンロード
+# 確認
+curl http://localhost:50021/version
 ```
+
+### 環境変数一覧
+
+| 変数 | デフォルト | 説明 |
+|------|----------|------|
+| `STACKCHAN_TTS` | `piper` | TTS エンジン（`piper` or `voicevox`） |
+| `STACKCHAN_IP` | `192.168.1.100` | WiFi モード時の IP アドレス |
+| `PIPER_BIN` | `piper` | piper バイナリのパス |
+| `PIPER_MODEL` | （なし） | piper モデルファイル（.onnx）のパス |
 
 ### WiFi 設定（オプション）
 
@@ -184,6 +229,15 @@ curl -o photo.jpg http://<CoreS3のIP>/capture
 ```
 
 解像度は QVGA (320x240)。Vision API に送る用途に十分な画質です。
+
+## トラブルシューティング
+
+- **Permission denied（Linux）**: `sudo usermod -aG dialout $USER` して再ログイン
+- **ポートが見つからない**: USBケーブルがデータ転送対応か確認（充電専用ケーブルはNG）
+- **VOICEVOX接続エラー**: `docker ps` でコンテナ起動確認、または `curl http://localhost:50021/version` で疎通確認
+- **音が鳴らない**: `uv run stackchan_atama.py volume 255` で最大音量に設定
+- **シリアルポートが掴まれている**: `lsof /dev/ttyACM0` で確認、`fuser -k /dev/ttyACM0` で解放
+- **シリアルでWAV転送が失敗する**: `--serial-chunk 256 --serial-delay 0.02` で転送速度を落とす
 
 ## AI エージェント連携
 
