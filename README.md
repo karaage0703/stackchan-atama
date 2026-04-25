@@ -21,7 +21,7 @@
 
 - `tools/stackchan_atama.py` - 制御CLI（pyserial + requests）
 - `src/main.cpp` - M5Stack用ファームウェア（PlatformIO）
-- `platformio.ini` - ビルド設定（CoreS3 / Core / Core2）
+- `platformio.ini` - ビルド設定（CoreS3 / Core / Core2 / AtomS3R）
 
 ## 動作確認済みデバイス
 
@@ -30,6 +30,7 @@
 | M5Stack CoreS3 | あり | 512KB | あり | 推奨。USB CDC |
 | M5Stack Core（初代/Basic） | なし | 80KB | なし | 短い発話向け。CP2104 UART |
 | M5Stack Core2 | あり | 未テスト | なし | |
+| M5Stack AtomS3R | あり | 512KB | なし | 小型構成。USB CDC。音声再生にはAtomic Voice Base等が必要 |
 
 > **PSRAMなしデバイスの制約**: M5Stack Core（初代）はPSRAMがないため、80KBを超えるWAVデータは受け付けません（HTTP 400 / シリアル `invalid size`）。長い文章は `--pipeline` オプションで分割送信してください。
 
@@ -71,7 +72,7 @@ WiFi 接続時は HTTP API も使用可能：
 
 ### 必要なもの
 
-- M5Stack Core / Core2 / CoreS3 のいずれか
+- M5Stack Core / Core2 / CoreS3 / AtomS3R のいずれか
 - USB-C ケーブル
 - [PlatformIO CLI](https://docs.platformio.org/en/stable/core/installation.html)（`uv tool install platformio` でもOK）
 - TTS エンジン（以下のいずれか）:
@@ -92,6 +93,9 @@ pio run -e m5stack-core2 -t upload
 
 # M5Stack Core (初代)
 pio run -e m5stack-core -t upload
+
+# M5Stack AtomS3R + Atomic Voice Base
+pio run -e m5stack-atoms3r -t upload
 ```
 
 書き込み後、M5Stack の画面にアバターの顔が表示されれば成功。
@@ -258,6 +262,7 @@ SKILL.md を参照してください。Claude Code や borot 等の AI エージ
 - **[AI_StackChan2](https://github.com/robo8080/AI_StackChan2)** — robo8080 さん
 - **[M5Unified](https://github.com/m5stack/M5Unified)** — らびやんさん ([@lovyan03](https://github.com/lovyan03))
 - **[VOICEVOX](https://voicevox.hiroshiba.jp/)** — ヒホさん ([@Hiroshiba](https://github.com/Hiroshiba))
+- **[@starf555](https://github.com/starf555)** — AtomS3R 対応の実装
 - **スタックチャンコミュニティ** — アイデア・知見を共有してくださっている全ての方々
 
 ## ライセンス
