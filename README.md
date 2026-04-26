@@ -253,6 +253,7 @@ curl -o photo.jpg http://<CoreS3のIP>/capture
 - **シリアルポートが掴まれている**: `lsof /dev/ttyACM0` で確認、`fuser -k /dev/ttyACM0` で解放
 - **シリアルでWAV転送が失敗する**: `--serial-chunk 256 --serial-delay 0.02` で転送速度を落とす
 - **`setup_piper.sh` がmacOSで「開発元未確認」**: スクリプトが `xattr -dr com.apple.quarantine` を自動実行するが、それ以前に手動で `_piper/` 内のバイナリを開いてしまうと Gatekeeper にゴミ箱送りされる。`FORCE=1 tools/setup_piper.sh` で再DL
+- **`piper failed: ... Opset 5 ... opset 3 only` エラー**: 初回実行時に piper が `models/tsukuyomi-chan-6lang-fp16.cpu.opt.onnx` という最適化キャッシュを書き出す。次回ロード時に onnxruntime の opset 互換性チェックでクラッシュすることがある。`rm models/*.cpu.opt.onnx*` で解消。再生成されるので何度でも実行可能
 
 ## AI エージェント連携
 
