@@ -5,6 +5,7 @@
 .vscode/ipch
 compile_commands.json
 
-# piper-plus (symlinks to local install, set up per environment)
+# piper-plus (downloaded by tools/setup_piper.sh, machine-specific)
+_piper/
 tools/piper
 models/
