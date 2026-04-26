@@ -20,8 +20,21 @@ IP: 環境変数 `STACKCHAN_IP` で指定（`--host` でも可）。
 ## TTS（音声合成）
 
 - **デフォルト: piper-plus**（環境変数 `STACKCHAN_TTS` で変更可能）
-- piper-plus: サーバー不要、バイナリ単体で動作。`PIPER_BIN` と `PIPER_MODEL` 環境変数で設定
+- piper-plus: サーバー不要、バイナリ単体で動作。`tools/setup_piper.sh` でセットアップ
 - VOICEVOX: `--tts voicevox` で切替。ローカルエンジン（port 50021）が必要
+
+## Step 0: 初回セットアップ（piper-plusのバイナリ・モデルが無い場合のみ）
+
+```bash
+cd [SKILL_DIR] && tools/setup_piper.sh
+```
+
+OS/ARCH を自動判定し、piper-plus の **ネイティブC++版バイナリ**（OpenJTalk辞書同梱）とつくよみちゃんモデルをダウンロード、`tools/piper` ラッパーを生成する。
+macOS arm64・Linux arm64/x64/armv7 対応。インストール済みならスキップ。
+
+**注意:** ayutaz/piper-plus には別途 C# CLI 版（`piper-plus-cli-*`）も存在するが、こちらは日本語を multilingual espeak phonemizer で処理するため発音が中国語風に崩れる。`setup_piper.sh` はネイティブC++版（`piper-{macos,linux}-*`）を選ぶこと。
+
+**`say` 実行時に `piper failed: ... Opset 5 ... opset 3 only` エラーが出たら:** 初回実行で生成された最適化キャッシュが onnxruntime と互換性が無い状態。`rm [SKILL_DIR]/models/*.cpu.opt.onnx*` で解消。
 
 ## 実行フロー
 

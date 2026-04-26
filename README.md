@@ -141,10 +141,9 @@ uv run stackchan_atama.py volume 200
 uv run stackchan_atama.py say "おはよう" --voice 3
 
 # piper-plus でオフライン音声合成（VOICEVOX 不要、Raspberry Pi 対応）
-uv run stackchan_atama.py --tts piper \
-  --piper-bin /path/to/piper \
-  --piper-model /path/to/model.onnx \
-  say "こんにちは"
+# 初回のみ setup_piper.sh でバイナリ・モデルをダウンロード（後述）
+tools/setup_piper.sh
+uv run stackchan_atama.py say "こんにちは"
 
 # WiFi 設定（NVS に保存される）
 uv run stackchan_atama.py wifi --ssid MySSID --password MyPassword
@@ -165,22 +164,29 @@ uv run stackchan_atama.py --port /dev/ttyACM1 status
 
 #### piper-plus（デフォルト）
 
-サーバー不要、バイナリ単体で動作。ARM64（Raspberry Pi / DGX Spark）対応。
+サーバー不要、バイナリ単体で動作。macOS arm64/x64 と Linux arm64/x64（Raspberry Pi / DGX Spark を含む）に対応。
 
-スクリプトは `tools/piper`（バイナリ）と `models/*.onnx`（モデル）を自動検出します。
-シンボリックリンクまたはコピーで配置してください：
+`tools/setup_piper.sh` がプラットフォームを自動判定し、バイナリ・モデル・ラッパーを一括セットアップします：
 
 ```bash
-# piper-plus バイナリ
-ln -s /path/to/piper-plus/piper/bin/piper tools/piper
-
-# モデルファイル + config
-mkdir -p models
-ln -s /path/to/piper-plus/models/tsukuyomi-chan-6lang-fp16.onnx models/
-ln -s /path/to/piper-plus/models/config.json models/
+tools/setup_piper.sh
 ```
 
-環境変数 `PIPER_BIN` / `PIPER_MODEL` での指定も可能（自動検出より優先）。
+中身：
+1. [ayutaz/piper-plus](https://github.com/ayutaz/piper-plus) リリースから `piper-plus-cli-*` (C# CLI、日本語対応) を `_piper/` にダウンロード
+2. つくよみちゃんモデル ([ayousanz/piper-plus-tsukuyomi-chan](https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan)) を `models/` にダウンロード
+3. `tools/piper` ラッパースクリプト（stdin → `-t` 引数変換）を生成
+4. macOS では `xattr -dr com.apple.quarantine` で検疫属性を解除
+
+スクリプトは `tools/piper`（ラッパー）と `models/*.onnx` を自動検出してロードします。
+バージョン固定や強制再DLは環境変数で：
+
+```bash
+PIPER_PLUS_VERSION=v1.11.0 tools/setup_piper.sh   # 特定バージョン
+FORCE=1 tools/setup_piper.sh                        # 既存ファイルを上書き
+```
+
+別の場所にインストール済みの場合は `PIPER_BIN` / `PIPER_MODEL` 環境変数で指定可能（自動検出より優先）。
 
 #### VOICEVOX（オプション）
 
@@ -199,9 +205,12 @@ curl http://localhost:50021/version
 | 変数 | デフォルト | 説明 |
 |------|----------|------|
 | `STACKCHAN_TTS` | `piper` | TTS エンジン（`piper` or `voicevox`） |
+| `STACKCHAN_PORT` | （自動検出） | USB シリアルポート（複数 ESP32 デバイスを接続している場合に明示指定） |
 | `STACKCHAN_IP` | `192.168.1.100` | WiFi モード時の IP アドレス |
-| `PIPER_BIN` | `piper` | piper バイナリのパス |
-| `PIPER_MODEL` | （なし） | piper モデルファイル（.onnx）のパス |
+| `PIPER_BIN` | `tools/piper`（自動検出） | piper バイナリのパス |
+| `PIPER_MODEL` | `models/*.onnx`（自動検出） | piper モデルファイル（.onnx）のパス |
+| `PIPER_PLUS_VERSION` | `v1.11.0` | `setup_piper.sh` がDLする piper-plus のバージョン |
+| `FORCE` | `0` | `setup_piper.sh` で既存ファイルを強制再ダウンロード |
 
 ### WiFi 設定（オプション）
 
@@ -238,10 +247,13 @@ curl -o photo.jpg http://<CoreS3のIP>/capture
 
 - **Permission denied（Linux）**: `sudo usermod -aG dialout $USER` して再ログイン
 - **ポートが見つからない**: USBケーブルがデータ転送対応か確認（充電専用ケーブルはNG）
+- **間違ったポートが選ばれる（複数ESP32接続時）**: `STACKCHAN_PORT=/dev/cu.usbmodem3101 ...` で明示指定。自動検出は Espressif 純正 USB CDC（VID 0x303A）を優先するが、CH340/CP210x 系の他デバイスが繋がっていると振り分けが必要
 - **VOICEVOX接続エラー**: `docker ps` でコンテナ起動確認、または `curl http://localhost:50021/version` で疎通確認
 - **音が鳴らない**: `uv run stackchan_atama.py volume 255` で最大音量に設定
 - **シリアルポートが掴まれている**: `lsof /dev/ttyACM0` で確認、`fuser -k /dev/ttyACM0` で解放
 - **シリアルでWAV転送が失敗する**: `--serial-chunk 256 --serial-delay 0.02` で転送速度を落とす
+- **`setup_piper.sh` がmacOSで「開発元未確認」**: スクリプトが `xattr -dr com.apple.quarantine` を自動実行するが、それ以前に手動で `_piper/` 内のバイナリを開いてしまうと Gatekeeper にゴミ箱送りされる。`FORCE=1 tools/setup_piper.sh` で再DL
+- **`piper failed: ... Opset 5 ... opset 3 only` エラー**: 初回実行時に piper が `models/tsukuyomi-chan-6lang-fp16.cpu.opt.onnx` という最適化キャッシュを書き出す。次回ロード時に onnxruntime の opset 互換性チェックでクラッシュすることがある。`rm models/*.cpu.opt.onnx*` で解消。再生成されるので何度でも実行可能
 
 ## AI エージェント連携
 

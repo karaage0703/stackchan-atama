@@ -66,17 +66,33 @@ DEFAULT_PIPER_MODEL = os.environ.get(
 
 
 def detect_serial_port():
-    """Auto-detect M5Stack serial port (macOS / Linux)"""
+    """Auto-detect M5Stack serial port (macOS / Linux).
+
+    Priority:
+      1. STACKCHAN_PORT env var
+      2. Espressif native USB CDC (VID 0x303A) — CoreS3 / AtomS3 / AtomS3R
+      3. CP210x / CH340 USB-Serial bridges (VID 0x10C4 / 0x1A86) — Core / Core2
+      4. Platform-specific glob fallback
+      5. Hard fallback: /dev/ttyACM0
+    """
+    env_port = os.environ.get("STACKCHAN_PORT")
+    if env_port:
+        return env_port
+
     import serial.tools.list_ports
 
-    # ESP32-S3 (CoreS3): VID=303A PID=1001
-    # CP2104 (Core/Core2): VID=10C4 PID=EA60
-    # CH9102/CH340 (Core/Core2): VID=1A86 PID=55D4 or 7523
-    known_vids = {0x303A, 0x10C4, 0x1A86}
+    # Tier 1: Espressif native USB CDC (CoreS3 / AtomS3 / AtomS3R)
+    ESPRESSIF_VID = 0x303A
+    # Tier 2: USB-Serial bridges used by Core / Core2
+    BRIDGE_VIDS = {0x10C4, 0x1A86}
 
-    for port_info in serial.tools.list_ports.comports():
-        if port_info.vid in known_vids:
-            return port_info.device
+    ports = list(serial.tools.list_ports.comports())
+    for p in ports:
+        if p.vid == ESPRESSIF_VID:
+            return p.device
+    for p in ports:
+        if p.vid in BRIDGE_VIDS:
+            return p.device
 
     # Fallback: platform-specific common names
     import glob
