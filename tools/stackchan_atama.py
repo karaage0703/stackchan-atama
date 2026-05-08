@@ -447,6 +447,28 @@ def piper_synthesize_many(texts, piper_bin=DEFAULT_PIPER_BIN, model=DEFAULT_PIPE
         return wavs
 
 
+def wait_for_complete_file(path, deadline, min_size=44):
+    """Wait until a generated WAV exists and its size has stopped changing."""
+    last_size = -1
+    stable_count = 0
+    while time.time() < deadline:
+        if not path.exists():
+            time.sleep(0.01)
+            continue
+
+        size = path.stat().st_size
+        if size >= min_size and size == last_size:
+            stable_count += 1
+            if stable_count >= 2:
+                return path.read_bytes()
+        else:
+            stable_count = 0
+        last_size = size
+        time.sleep(0.02)
+
+    raise TimeoutError(f"timed out waiting for complete file: {path.name}")
+
+
 class PiperProcess:
     """Persistent piper-plus JSONL process for low-latency repeated synthesis."""
 
@@ -498,13 +520,13 @@ class PiperProcess:
             wavs = []
             for filename in filenames:
                 path = Path(self.tmpdir.name) / filename
-                while not path.exists():
+                while not path.exists() and time.time() <= deadline:
                     if self.process.poll() is not None:
                         raise RuntimeError(f"piper process exited with code {self.process.returncode}")
-                    if time.time() > deadline:
-                        raise TimeoutError(f"piper timed out waiting for {filename}")
                     time.sleep(0.01)
-                wavs.append(path.read_bytes())
+                if self.process.poll() is not None:
+                    raise RuntimeError(f"piper process exited with code {self.process.returncode}")
+                wavs.append(wait_for_complete_file(path, deadline))
                 try:
                     path.unlink()
                 except OSError:
