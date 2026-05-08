@@ -11,7 +11,7 @@
 - 表情変更（happy, sad, angry, sleepy, doubt, neutral）
 - TTS は PC 側で自由に選択（piper-plus / VOICEVOX 等）
 - パイプライン再生対応（文を分割して順次送信、最初のチャンクを即座に再生開始）
-- **xangi pull 型 SSE 連携**（`GET /api/events/stream` を購読して返答完了時に喋る）
+- オプション: **xangi 連携**（`GET /api/events/stream` を購読して返答完了時に喋る）
 
 ### 通常のスタックチャンとの違い
 
@@ -177,7 +177,7 @@ tools/setup_piper.sh
 ```
 
 中身：
-1. [ayutaz/piper-plus](https://github.com/ayutaz/piper-plus) リリースから `piper-plus-cli-*` を `_piper/` にダウンロード
+1. [ayutaz/piper-plus](https://github.com/ayutaz/piper-plus) リリースから `piper-plus-cli-*`（macOS/Linux arm64/x64）または `piper-linux-armv7`（Linux armv7）を `_piper/` にダウンロード
 2. つくよみちゃんモデル ([ayousanz/piper-plus-tsukuyomi-chan](https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan)) を `models/` にダウンロード
 3. `tools/piper` ラッパースクリプト（stdin → `-t` 引数変換）を生成
 
@@ -252,9 +252,9 @@ curl -o photo.jpg http://<CoreS3のIP>/capture
 
 解像度は QVGA (320x240)。Vision API に送る用途に十分な画質です。
 
-## xangi 連携
+## xangi 連携（オプション）
 
-`xangi-bridge` サブコマンドは `xangi-pet` と同じ pull 型 SSE を使って xangi の `GET /api/events/stream` を購読し、`turn.complete` の最終テキストを stackchan-atama に喋らせます。
+`xangi-bridge` サブコマンドは xangi の `GET /api/events/stream` を購読し、`turn.complete` の最終テキストを stackchan-atama に喋らせます。xangi を使わない場合は、この機能は無視して構いません。
 
 ```bash
 # 既定: XANGI_URL=http://127.0.0.1:18888

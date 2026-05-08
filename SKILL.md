@@ -6,7 +6,7 @@ description: スタックチャン・アタマ（M5Stack単体版）をUSBシリ
 # スタックチャン・アタマ制御スキル
 
 USBシリアルまたはWiFi HTTP API経由でスタックチャン・アタマ（M5Stack単体、サーボ不要版）を制御する。
-`xangi-pet` と同じ pull 型 SSE で xangi の返答イベントを購読し、stackchan-atama に喋らせることもできる。
+xangi 連携はオプションで、xangi の返答イベントを購読して stackchan-atama に喋らせることもできる。
 
 ## 接続モード
 
@@ -30,12 +30,12 @@ IP: 環境変数 `STACKCHAN_IP` で指定（`--host` でも可）。
 cd [SKILL_DIR] && tools/setup_piper.sh
 ```
 
-OS/ARCH を自動判定し、piper-plus CLI とつくよみちゃん 6-language モデルをダウンロード、`tools/piper` ラッパーを生成する。
+OS/ARCH を自動判定し、piper-plus CLI（macOS/Linux arm64/x64）または native piper-plus（Linux armv7）と、つくよみちゃん 6-language モデルをダウンロード、`tools/piper` ラッパーを生成する。
 
 `tools/piper` はモデルカードの推奨どおり `--language ja-en-zh-es-fr-pt` と
 `--length-scale 1.5` を既定で使う。上書きする場合は `PIPER_LANGUAGE` /
 `PIPER_LENGTH_SCALE` / `PIPER_NOISE_SCALE` を指定する。
-macOS arm64/x64・Linux arm64/x64 対応。インストール済みならスキップ。
+macOS arm64/x64・Linux arm64/x64・Linux armv7 対応。インストール済みならスキップ。
 
 **`say` 実行時に `piper failed: ... Opset 5 ... opset 3 only` エラーが出たら:** 初回実行で生成された最適化キャッシュが onnxruntime と互換性が無い状態。`rm [SKILL_DIR]/models/*.cpu.opt.onnx*` で解消。
 
@@ -110,10 +110,10 @@ cd [SKILL_DIR] && uv run tools/stackchan_atama.py wifi-config --ssid MyNetwork -
 cd [SKILL_DIR] && uv run tools/stackchan_atama.py wifi-config --clear
 ```
 
-### Step 8: xangi の返答をそのまま喋らせる
+### Step 8: xangi の返答をそのまま喋らせる（オプション）
 
 ```bash
-# xangi-pet と同じ pull 型 SSE 接続
+# xangi の pull 型 SSE 接続
 cd [SKILL_DIR] && uv run tools/stackchan_atama.py xangi-bridge --xangi-url http://127.0.0.1:18888 --pipeline
 
 # 特定チャンネルだけに絞る
