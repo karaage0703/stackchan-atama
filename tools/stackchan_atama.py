@@ -8,16 +8,16 @@ USB シリアルまたは WiFi HTTP API 経由でスタックチャン（アタ�
 
 Usage:
     # USB Serial (default)
-    uv run stackchan_atama.py say "こんにちは"
-    uv run stackchan_atama.py say "長い文章。複数に分割されます。" --pipeline
-    uv run stackchan_atama.py face happy
-    uv run stackchan_atama.py status
-    uv run stackchan_atama.py capture -o photo.jpg
+    uv run tools/stackchan_atama.py say "こんにちは"
+    uv run tools/stackchan_atama.py say "長い文章。複数に分割されます。" --pipeline
+    uv run tools/stackchan_atama.py face happy
+    uv run tools/stackchan_atama.py status
+    uv run tools/stackchan_atama.py capture -o photo.jpg
 
     # WiFi HTTP API
-    uv run stackchan_atama.py --wifi say "こんにちは"
-    uv run stackchan_atama.py --wifi --host $STACKCHAN_IP face happy
-    uv run stackchan_atama.py --wifi capture -o photo.jpg
+    uv run tools/stackchan_atama.py --wifi say "こんにちは"
+    uv run tools/stackchan_atama.py --wifi --host $STACKCHAN_IP face happy
+    uv run tools/stackchan_atama.py --wifi capture -o photo.jpg
 """
 # /// script
 # requires-python = ">=3.10"
@@ -34,9 +34,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from queue import Queue
+from typing import Iterator
 
 import subprocess
 import tempfile
+import threading
 
 import requests
 import serial
@@ -48,12 +50,18 @@ DEFAULT_VOICEVOX_SPEAKER = 1  # ずんだもん（あまあま）
 DEFAULT_SAMPLE_RATE = 16000  # 16kHz (M5Stackスピーカーには十分)
 DEFAULT_WIFI_HOST = os.environ.get("STACKCHAN_IP", "192.168.1.100")
 DEFAULT_TTS = os.environ.get("STACKCHAN_TTS", "piper")  # "voicevox" or "piper"
+DEFAULT_XANGI_URL = os.environ.get("XANGI_URL", "http://127.0.0.1:18888")
 
-# piper-plus: auto-detect from skill directory (tools/piper, models/*.onnx)
+# piper-plus: auto-detect from skill directory.
+# Exclude piper-plus generated optimization caches (*.cpu.opt*.onnx); they can
+# recursively generate more caches and should not become the default model.
 _SCRIPT_DIR = Path(__file__).resolve().parent  # tools/
 _SKILL_DIR = _SCRIPT_DIR.parent               # stackchan-atama/
 _LOCAL_PIPER_BIN = _SCRIPT_DIR / "piper"
-_LOCAL_PIPER_MODELS = sorted(_SKILL_DIR.glob("models/*.onnx"))
+_LOCAL_PIPER_MODELS = sorted(
+    p for p in _SKILL_DIR.glob("models/*.onnx")
+    if ".cpu.opt" not in p.name
+)
 
 DEFAULT_PIPER_BIN = os.environ.get(
     "PIPER_BIN",
@@ -63,6 +71,9 @@ DEFAULT_PIPER_MODEL = os.environ.get(
     "PIPER_MODEL",
     str(_LOCAL_PIPER_MODELS[0]) if _LOCAL_PIPER_MODELS else ""
 )
+DEFAULT_PIPER_LANGUAGE = os.environ.get("PIPER_LANGUAGE", "ja-en-zh-es-fr-pt")
+DEFAULT_PIPER_LENGTH_SCALE = os.environ.get("PIPER_LENGTH_SCALE", "1.5")
+DEFAULT_PIPER_NOISE_SCALE = os.environ.get("PIPER_NOISE_SCALE", "0.667")
 
 
 def detect_serial_port():
@@ -368,6 +379,152 @@ def piper_synthesize(text, piper_bin=DEFAULT_PIPER_BIN, model=DEFAULT_PIPER_MODE
     return wav_data
 
 
+def piper_cli_bin(piper_bin):
+    """Resolve tools/piper wrapper to the underlying PiperPlus.Cli for JSONL mode."""
+    path = Path(piper_bin)
+    if path.name == "piper":
+        root = path.parent.parent if path.parent != Path(".") else _SKILL_DIR
+        cli = root / "_piper" / "PiperPlus.Cli"
+        if cli.exists():
+            return str(cli)
+    return piper_bin
+
+
+def piper_config_args(model):
+    model_path = Path(model)
+    default_config = model_path.with_suffix(model_path.suffix + ".json")
+    alt_config = model_path.parent / "config.json"
+    if not default_config.exists() and alt_config.exists():
+        return ["--config", str(alt_config)]
+    return []
+
+
+def piper_synthesize_many(texts, piper_bin=DEFAULT_PIPER_BIN, model=DEFAULT_PIPER_MODEL, speaker=0):
+    """Generate multiple WAVs in one piper-plus process to avoid repeated model loads."""
+    if not model:
+        raise RuntimeError("--piper-model is required when using --tts piper")
+    texts = [text for text in texts if text.strip()]
+    if not texts:
+        return []
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filenames = [f"chunk_{i:03}.wav" for i in range(len(texts))]
+        jsonl = "\n".join(
+            json.dumps({"text": text, "output_file": filename}, ensure_ascii=False)
+            for text, filename in zip(texts, filenames)
+        ) + "\n"
+        cmd = [
+            piper_cli_bin(piper_bin),
+            "--model", model,
+            "--json-input",
+            "--output-dir", tmpdir,
+            "--language", DEFAULT_PIPER_LANGUAGE,
+            "--length-scale", DEFAULT_PIPER_LENGTH_SCALE,
+            "--noise-scale", DEFAULT_PIPER_NOISE_SCALE,
+        ] + piper_config_args(model)
+        if speaker:
+            cmd += ["--speaker", str(speaker)]
+
+        result = subprocess.run(
+            cmd,
+            input=jsonl.encode("utf-8"),
+            capture_output=True,
+            env=os.environ.copy(),
+            timeout=max(30, 10 * len(texts)),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"piper failed: {result.stderr.decode('utf-8', errors='replace')}")
+
+        wavs = []
+        for filename in filenames:
+            path = Path(tmpdir) / filename
+            if not path.exists():
+                raise RuntimeError(
+                    f"piper did not write {filename}: "
+                    f"{result.stderr.decode('utf-8', errors='replace')}"
+                )
+            wavs.append(path.read_bytes())
+        return wavs
+
+
+class PiperProcess:
+    """Persistent piper-plus JSONL process for low-latency repeated synthesis."""
+
+    def __init__(self, piper_bin=DEFAULT_PIPER_BIN, model=DEFAULT_PIPER_MODEL, speaker=0):
+        if not model:
+            raise RuntimeError("--piper-model is required when using --tts piper")
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.lock = threading.Lock()
+        self.counter = 0
+        cmd = [
+            piper_cli_bin(piper_bin),
+            "--model", model,
+            "--json-input",
+            "--output-dir", self.tmpdir.name,
+            "--language", DEFAULT_PIPER_LANGUAGE,
+            "--length-scale", DEFAULT_PIPER_LENGTH_SCALE,
+            "--noise-scale", DEFAULT_PIPER_NOISE_SCALE,
+            "--quiet",
+        ] + piper_config_args(model)
+        if speaker:
+            cmd += ["--speaker", str(speaker)]
+        self.process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        )
+
+    def synthesize_many(self, texts, timeout=None):
+        texts = [text for text in texts if text.strip()]
+        if not texts:
+            return []
+        timeout = timeout or max(30, 10 * len(texts))
+        with self.lock:
+            if self.process.poll() is not None:
+                raise RuntimeError(f"piper process exited with code {self.process.returncode}")
+            filenames = []
+            for text in texts:
+                self.counter += 1
+                filename = f"live_{self.counter:06}.wav"
+                filenames.append(filename)
+                line = json.dumps({"text": text, "output_file": filename}, ensure_ascii=False)
+                self.process.stdin.write(line + "\n")
+            self.process.stdin.flush()
+
+            deadline = time.time() + timeout
+            wavs = []
+            for filename in filenames:
+                path = Path(self.tmpdir.name) / filename
+                while not path.exists():
+                    if self.process.poll() is not None:
+                        raise RuntimeError(f"piper process exited with code {self.process.returncode}")
+                    if time.time() > deadline:
+                        raise TimeoutError(f"piper timed out waiting for {filename}")
+                    time.sleep(0.01)
+                wavs.append(path.read_bytes())
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+            return wavs
+
+    def close(self):
+        try:
+            if self.process.stdin:
+                self.process.stdin.close()
+        except Exception:
+            pass
+        try:
+            self.process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait(timeout=3)
+        self.tmpdir.cleanup()
+
+
 def split_text(text):
     """Split text at Japanese/English punctuation for pipeline playback"""
     parts = re.split(r"(?<=[。！？!?])", text)
@@ -375,6 +532,125 @@ def split_text(text):
     if not chunks:
         chunks = [text]
     return chunks
+
+
+def normalize_xangi_stream_url(url):
+    """Accept either a base xangi URL or a full /api/events/stream URL."""
+    trimmed = url.strip().rstrip("/")
+    if not trimmed:
+        raise ValueError("xangi URL is empty")
+    if trimmed.endswith("/api/events/stream"):
+        return trimmed
+    if trimmed.startswith("http://") or trimmed.startswith("https://"):
+        return f"{trimmed}/api/events/stream"
+    raise ValueError(f"xangi URL must start with http:// or https:// (got {url})")
+
+
+def iter_sse_messages(url, timeout=65):
+    """Yield parsed SSE events from xangi's pull stream."""
+    with requests.get(
+        url,
+        stream=True,
+        headers={"Accept": "text/event-stream"},
+        timeout=(5, timeout),
+    ) as resp:
+        resp.raise_for_status()
+        event = "message"
+        data_lines = []
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            if raw_line is None:
+                continue
+            line = raw_line.rstrip("\r")
+            if line == "":
+                if data_lines:
+                    yield {"event": event, "data": "\n".join(data_lines)}
+                event = "message"
+                data_lines = []
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("event:"):
+                event = line[6:].strip() or "message"
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+                continue
+
+
+def iter_xangi_events(url, timeout=65) -> Iterator[dict]:
+    """Yield JSON payloads from xangi's SSE stream."""
+    for msg in iter_sse_messages(url, timeout=timeout):
+        if msg["event"] == "ready":
+            payload = json.loads(msg["data"])
+            payload["_sse_event"] = "ready"
+            yield payload
+            continue
+        payload = json.loads(msg["data"])
+        payload["_sse_event"] = msg["event"]
+        yield payload
+
+
+def set_face_if_needed(sc, expression, current_face):
+    if not expression or current_face[0] == expression:
+        return
+    result = sc.send_command(f"FACE:{expression}")
+    current_face[0] = expression
+    print(json.dumps({"face": expression, "result": result}, ensure_ascii=False), file=sys.stderr)
+
+
+def speak_text(sc, text, args):
+    text = (text or "").strip()
+    if not text:
+        return
+
+    if args.pipeline:
+        chunks = split_text(text)
+        print(f"xangi bridge: speaking {len(chunks)} chunks", file=sys.stderr)
+        wav_queue = Queue(maxsize=4)
+
+        def tts_worker():
+            for i, chunk, wav, tts_time in synthesize_chunks(chunks, args):
+                wav_queue.put((i, chunk, wav, tts_time))
+            wav_queue.put(None)
+
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(tts_worker)
+
+        while True:
+            item = wav_queue.get()
+            if item is None:
+                break
+            i, chunk, wav, tts_time = item
+            t0 = time.time()
+            if isinstance(sc, StackchanSerial):
+                result = sc.send_wav(wav, chunk_size=args.serial_chunk, chunk_delay=args.serial_delay)
+            else:
+                result = sc.send_wav(wav)
+            send_time = time.time() - t0
+            print(
+                json.dumps(
+                    {
+                        "chunk": i,
+                        "chunks": len(chunks),
+                        "text": chunk,
+                        "tts_seconds": round(tts_time, 2),
+                        "send_seconds": round(send_time, 2),
+                        "bytes": len(wav),
+                        "result": result,
+                    },
+                    ensure_ascii=False,
+                ),
+                file=sys.stderr,
+            )
+        executor.shutdown(wait=False)
+        return
+
+    wav = synthesize(text, args)
+    if isinstance(sc, StackchanSerial):
+        result = sc.send_wav(wav, chunk_size=args.serial_chunk, chunk_delay=args.serial_delay)
+    else:
+        result = sc.send_wav(wav)
+    print(json.dumps({"text": text, "result": result}, ensure_ascii=False), file=sys.stderr)
 
 
 # ---- Commands ----
@@ -398,6 +674,27 @@ def synthesize(text, args):
         return voicevox_synthesize(text, args.voicevox_url, args.voice, args.sample_rate)
 
 
+def synthesize_chunks(chunks, args):
+    """Generate chunk WAVs. Piper uses one JSONL batch to load the model once."""
+    if args.tts == "piper":
+        t0 = time.time()
+        piper_process = getattr(args, "piper_process", None)
+        if piper_process:
+            wavs = piper_process.synthesize_many(chunks)
+        else:
+            wavs = piper_synthesize_many(chunks, args.piper_bin, args.piper_model, args.piper_speaker)
+        tts_time = time.time() - t0
+        for i, (chunk, wav) in enumerate(zip(chunks, wavs), start=1):
+            yield i, chunk, wav, tts_time if i == 1 else 0.0
+        return
+
+    for i, chunk in enumerate(chunks, start=1):
+        t0 = time.time()
+        wav = synthesize(chunk, args)
+        tts_time = time.time() - t0
+        yield i, chunk, wav, tts_time
+
+
 def cmd_say(args):
     if args.tts == "voicevox":
         check_voicevox(args.voicevox_url)
@@ -414,10 +711,7 @@ def cmd_say(args):
         wav_queue = Queue(maxsize=4)
 
         def tts_worker():
-            for i, chunk in enumerate(chunks):
-                t0 = time.time()
-                wav = synthesize(chunk, args)
-                tts_time = time.time() - t0
+            for i, chunk, wav, tts_time in synthesize_chunks(chunks, args):
                 wav_queue.put((i, chunk, wav, tts_time))
             wav_queue.put(None)  # sentinel
 
@@ -435,7 +729,7 @@ def cmd_say(args):
             else:
                 result = sc.send_wav(wav)
             send_time = time.time() - t0
-            print(f"  [{i+1}/{len(chunks)}] TTS:{tts_time:.2f}s Send:{send_time:.2f}s ({len(wav)}B) {chunk}", file=sys.stderr)
+            print(f"  [{i}/{len(chunks)}] TTS:{tts_time:.2f}s Send:{send_time:.2f}s ({len(wav)}B) {chunk}", file=sys.stderr)
 
         executor.shutdown(wait=False)
     else:
@@ -525,6 +819,90 @@ def cmd_play(args):
     print(json.dumps(result, ensure_ascii=False))
 
 
+def cmd_xangi_bridge(args):
+    if args.tts == "voicevox":
+        check_voicevox(args.voicevox_url)
+    elif args.tts == "piper" and not args.piper_model:
+        print("Error: --piper-model is required when using --tts piper", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        stream_url = normalize_xangi_stream_url(args.xangi_url)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    sc = get_backend(args)
+    sc.open()
+    args.piper_process = None
+    if args.tts == "piper":
+        args.piper_process = PiperProcess(args.piper_bin, args.piper_model, args.piper_speaker)
+    current_face = [None]
+    set_face_if_needed(sc, args.face_idle, current_face)
+
+    backoff = max(args.retry_seconds, 1.0)
+    max_backoff = max(backoff, args.max_retry_seconds)
+    active_turn = None
+
+    try:
+        while True:
+            try:
+                print(f"xangi bridge: connecting to {stream_url}", file=sys.stderr)
+                for ev in iter_xangi_events(stream_url, timeout=args.stream_timeout):
+                    sse_event = ev.get("_sse_event")
+                    if sse_event == "ready":
+                        print(json.dumps({"ready": ev}, ensure_ascii=False), file=sys.stderr)
+                        continue
+
+                    if args.instance_id and ev.get("instance_id") != args.instance_id:
+                        continue
+                    if args.thread_id and ev.get("thread_id") != args.thread_id:
+                        continue
+
+                    ev_type = ev.get("type")
+                    if not ev_type:
+                        continue
+                    print(json.dumps(ev, ensure_ascii=False), file=sys.stderr)
+
+                    if ev_type == "turn.started":
+                        active_turn = ev.get("turn_id")
+                        set_face_if_needed(sc, args.face_thinking, current_face)
+                    elif ev_type == "message.delta":
+                        if active_turn == ev.get("turn_id"):
+                            set_face_if_needed(sc, args.face_talking, current_face)
+                    elif ev_type == "turn.complete":
+                        active_turn = None
+                        set_face_if_needed(sc, args.face_talking, current_face)
+                        speak_text(sc, ev.get("text", ""), args)
+                        set_face_if_needed(sc, args.face_idle, current_face)
+                    elif ev_type == "turn.aborted":
+                        active_turn = None
+                        set_face_if_needed(sc, args.face_idle, current_face)
+                    elif ev_type == "agent.error":
+                        active_turn = None
+                        set_face_if_needed(sc, args.face_error, current_face)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                print(
+                    f"xangi bridge: stream error: {e} (retry in {backoff:.1f}s)",
+                    file=sys.stderr,
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, max_backoff)
+                continue
+
+            backoff = max(args.retry_seconds, 1.0)
+            time.sleep(backoff)
+    except KeyboardInterrupt:
+        print("xangi bridge: stopped", file=sys.stderr)
+    finally:
+        set_face_if_needed(sc, args.face_idle, current_face)
+        if args.piper_process:
+            args.piper_process.close()
+        sc.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description="stackchan-atama controller")
     parser.add_argument("--port", default=DEFAULT_PORT, help=f"Serial port (default: {DEFAULT_PORT})")
@@ -533,7 +911,7 @@ def main():
     parser.add_argument("--host", default=DEFAULT_WIFI_HOST, help=f"WiFi host IP (default: {DEFAULT_WIFI_HOST}, env: STACKCHAN_IP)")
     parser.add_argument("--voicevox-url", default=DEFAULT_VOICEVOX_URL, help="VOICEVOX Engine URL")
     parser.add_argument("--tts", choices=["voicevox", "piper"], default=DEFAULT_TTS,
-                        help="TTS engine (default: voicevox)")
+                        help="TTS engine (default: piper)")
     parser.add_argument("--piper-bin", default=DEFAULT_PIPER_BIN,
                         help="Path to piper binary (default: piper, env: PIPER_BIN)")
     parser.add_argument("--piper-model", default=DEFAULT_PIPER_MODEL,
@@ -577,6 +955,35 @@ def main():
     p_play = sub.add_parser("play", help="Play a WAV file directly")
     p_play.add_argument("file", help="WAV file path")
     p_play.set_defaults(func=cmd_play)
+
+    p_bridge = sub.add_parser("xangi-bridge", help="Subscribe to xangi SSE and speak completed responses")
+    p_bridge.add_argument("--xangi-url", default=DEFAULT_XANGI_URL,
+                          help="Base xangi URL or full /api/events/stream URL (env: XANGI_URL)")
+    p_bridge.add_argument("--thread-id", default="",
+                          help="Optional thread filter, e.g. discord:1234567890")
+    p_bridge.add_argument("--instance-id", default="",
+                          help="Optional xangi instance_id filter")
+    p_bridge.add_argument("--retry-seconds", type=float, default=1.0,
+                          help="Initial reconnect delay in seconds (default: 1)")
+    p_bridge.add_argument("--max-retry-seconds", type=float, default=30.0,
+                          help="Max reconnect delay in seconds (default: 30)")
+    p_bridge.add_argument("--stream-timeout", type=int, default=65,
+                          help="Read timeout for SSE stream in seconds (default: 65)")
+    p_bridge.add_argument("--face-idle", default="neutral",
+                          help="Face to use while idle (default: neutral)")
+    p_bridge.add_argument("--face-thinking", default="doubt",
+                          help="Face to use after turn.started (default: doubt)")
+    p_bridge.add_argument("--face-talking", default="happy",
+                          help="Face to use while talking / before speaking (default: happy)")
+    p_bridge.add_argument("--face-error", default="sad",
+                          help="Face to use on agent.error (default: sad)")
+    p_bridge.add_argument("--pipeline", action="store_true",
+                          help="Speak final text in sentence chunks for faster playback")
+    p_bridge.add_argument("--voice", type=int, default=DEFAULT_VOICEVOX_SPEAKER,
+                          help="VOICEVOX speaker ID when --tts voicevox is used")
+    p_bridge.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE,
+                          help="WAV sample rate for VOICEVOX (default: 16000)")
+    p_bridge.set_defaults(func=cmd_xangi_bridge)
 
     args = parser.parse_args()
     args.func(args)

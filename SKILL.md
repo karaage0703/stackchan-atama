@@ -6,6 +6,7 @@ description: スタックチャン・アタマ（M5Stack単体版）をUSBシリ
 # スタックチャン・アタマ制御スキル
 
 USBシリアルまたはWiFi HTTP API経由でスタックチャン・アタマ（M5Stack単体、サーボ不要版）を制御する。
+`xangi-pet` と同じ pull 型 SSE で xangi の返答イベントを購読し、stackchan-atama に喋らせることもできる。
 
 ## 接続モード
 
@@ -29,10 +30,12 @@ IP: 環境変数 `STACKCHAN_IP` で指定（`--host` でも可）。
 cd [SKILL_DIR] && tools/setup_piper.sh
 ```
 
-OS/ARCH を自動判定し、piper-plus の **ネイティブC++版バイナリ**（OpenJTalk辞書同梱）とつくよみちゃんモデルをダウンロード、`tools/piper` ラッパーを生成する。
-macOS arm64・Linux arm64/x64/armv7 対応。インストール済みならスキップ。
+OS/ARCH を自動判定し、piper-plus CLI とつくよみちゃん 6-language モデルをダウンロード、`tools/piper` ラッパーを生成する。
 
-**注意:** ayutaz/piper-plus には別途 C# CLI 版（`piper-plus-cli-*`）も存在するが、こちらは日本語を multilingual espeak phonemizer で処理するため発音が中国語風に崩れる。`setup_piper.sh` はネイティブC++版（`piper-{macos,linux}-*`）を選ぶこと。
+`tools/piper` はモデルカードの推奨どおり `--language ja-en-zh-es-fr-pt` と
+`--length-scale 1.5` を既定で使う。上書きする場合は `PIPER_LANGUAGE` /
+`PIPER_LENGTH_SCALE` / `PIPER_NOISE_SCALE` を指定する。
+macOS arm64/x64・Linux arm64/x64 対応。インストール済みならスキップ。
 
 **`say` 実行時に `piper failed: ... Opset 5 ... opset 3 only` エラーが出たら:** 初回実行で生成された最適化キャッシュが onnxruntime と互換性が無い状態。`rm [SKILL_DIR]/models/*.cpu.opt.onnx*` で解消。
 
@@ -107,6 +110,25 @@ cd [SKILL_DIR] && uv run tools/stackchan_atama.py wifi-config --ssid MyNetwork -
 cd [SKILL_DIR] && uv run tools/stackchan_atama.py wifi-config --clear
 ```
 
+### Step 8: xangi の返答をそのまま喋らせる
+
+```bash
+# xangi-pet と同じ pull 型 SSE 接続
+cd [SKILL_DIR] && uv run tools/stackchan_atama.py xangi-bridge --xangi-url http://127.0.0.1:18888 --pipeline
+
+# 特定チャンネルだけに絞る
+cd [SKILL_DIR] && uv run tools/stackchan_atama.py xangi-bridge \
+  --xangi-url http://127.0.0.1:18888 \
+  --thread-id discord:1478428157932605480 \
+  --pipeline
+```
+
+既定動作:
+- `turn.started` → `doubt`
+- `message.delta` → `happy`
+- `turn.complete` → 最終テキストを発話して `neutral`
+- `agent.error` → `sad`
+
 ## borot連携
 
 borotの返答をスタックチャンに喋らせたい場合:
@@ -140,6 +162,8 @@ uv run tools/stackchan_atama.py --wifi capture -o /tmp/photo.jpg
 ## 注意点
 
 - 長文は `--pipeline` で分割送信すると体感速度が上がる
+- `xangi-bridge` では piper-plus を JSONL 入力の常駐プロセスとして保持し、初回だけモデルロードする。2回目以降のTTSはロードなしで低遅延になる
+- 発話速度を優先する場合は `PIPER_LENGTH_SCALE=1.2` のように小さくできる（既定はモデルカード推奨の `1.5`）。品質とのトレードオフ
 - M5Stack Core（初代）はPSRAMがないため80KB超のWAVは不可 → `--pipeline` で回避
 - シリアル転送が失敗する場合: `--serial-chunk 256 --serial-delay 0.02` で速度を落とす
 
@@ -152,4 +176,5 @@ stackchan-atamaの状態確認して
 スタックチャンに「今日もがんばろう」って喋らせて
 スタックチャンで写真撮って
 スタックチャンの音量上げて
+xangi の返答を stackchan-atama で読ませて
 ```

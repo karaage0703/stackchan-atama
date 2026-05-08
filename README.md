@@ -11,6 +11,7 @@
 - 表情変更（happy, sad, angry, sleepy, doubt, neutral）
 - TTS は PC 側で自由に選択（piper-plus / VOICEVOX 等）
 - パイプライン再生対応（文を分割して順次送信、最初のチャンクを即座に再生開始）
+- **xangi pull 型 SSE 連携**（`GET /api/events/stream` を購読して返答完了時に喋る）
 
 ### 通常のスタックチャンとの違い
 
@@ -113,7 +114,7 @@ ls -la /dev/stackchan  # -> /dev/ttyACMx へのシンボリックリンク
 
 設定後は `--port /dev/stackchan` でアクセスできます：
 ```bash
-uv run stackchan_atama.py --port /dev/stackchan status
+uv run tools/stackchan_atama.py --port /dev/stackchan status
 pio run -e m5stack-cores3 -t upload --upload-port /dev/stackchan
 ```
 
@@ -123,39 +124,42 @@ pio run -e m5stack-cores3 -t upload --upload-port /dev/stackchan
 cd tools
 
 # 接続確認
-uv run stackchan_atama.py status
+uv run tools/stackchan_atama.py status
 
 # 音声合成してスタックチャンで再生
-uv run stackchan_atama.py say "こんにちは"
+uv run tools/stackchan_atama.py say "こんにちは"
 
 # パイプラインモード（長文を分割して高速再生）
-uv run stackchan_atama.py say "こんにちは！今日もいい天気ですね。" --pipeline
+uv run tools/stackchan_atama.py say "こんにちは！今日もいい天気ですね。" --pipeline
 
 # 表情変更
-uv run stackchan_atama.py face happy
+uv run tools/stackchan_atama.py face happy
 
 # 音量変更
-uv run stackchan_atama.py volume 200
+uv run tools/stackchan_atama.py volume 200
 
 # 話者変更
-uv run stackchan_atama.py say "おはよう" --voice 3
+uv run tools/stackchan_atama.py say "おはよう" --voice 3
 
 # piper-plus でオフライン音声合成（VOICEVOX 不要、Raspberry Pi 対応）
 # 初回のみ setup_piper.sh でバイナリ・モデルをダウンロード（後述）
 tools/setup_piper.sh
-uv run stackchan_atama.py say "こんにちは"
+uv run tools/stackchan_atama.py say "こんにちは"
 
 # WiFi 設定（NVS に保存される）
-uv run stackchan_atama.py wifi --ssid MySSID --password MyPassword
+uv run tools/stackchan_atama.py wifi-config --ssid MySSID --password MyPassword
 
 # WiFi 認証情報消去
-uv run stackchan_atama.py wifi --clear
+uv run tools/stackchan_atama.py wifi-config --clear
 
 # カメラキャプチャ（CoreS3 のみ）
-uv run stackchan_atama.py capture -o photo.jpg
+uv run tools/stackchan_atama.py capture -o photo.jpg
 
 # シリアルポート指定
-uv run stackchan_atama.py --port /dev/ttyACM1 status
+uv run tools/stackchan_atama.py --port /dev/ttyACM1 status
+
+# xangi の返答を pull 型 SSE で購読して喋る
+uv run tools/stackchan_atama.py xangi-bridge --xangi-url http://127.0.0.1:18888 --pipeline
 ```
 
 ### TTS エンジンの設定
@@ -173,16 +177,20 @@ tools/setup_piper.sh
 ```
 
 中身：
-1. [ayutaz/piper-plus](https://github.com/ayutaz/piper-plus) リリースから `piper-plus-cli-*` (C# CLI、日本語対応) を `_piper/` にダウンロード
+1. [ayutaz/piper-plus](https://github.com/ayutaz/piper-plus) リリースから `piper-plus-cli-*` を `_piper/` にダウンロード
 2. つくよみちゃんモデル ([ayousanz/piper-plus-tsukuyomi-chan](https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan)) を `models/` にダウンロード
 3. `tools/piper` ラッパースクリプト（stdin → `-t` 引数変換）を生成
+
+同梱のつくよみちゃん 6-language モデルは、モデルカードの推奨に合わせて
+`--language ja-en-zh-es-fr-pt` と `--length-scale 1.5` を既定で使います。
+必要なら `PIPER_LANGUAGE` / `PIPER_LENGTH_SCALE` / `PIPER_NOISE_SCALE` で上書きできます。
 4. macOS では `xattr -dr com.apple.quarantine` で検疫属性を解除
 
 スクリプトは `tools/piper`（ラッパー）と `models/*.onnx` を自動検出してロードします。
 バージョン固定や強制再DLは環境変数で：
 
 ```bash
-PIPER_PLUS_VERSION=v1.11.0 tools/setup_piper.sh   # 特定バージョン
+PIPER_PLUS_VERSION=v1.12.0 tools/setup_piper.sh   # 特定バージョン
 FORCE=1 tools/setup_piper.sh                        # 既存ファイルを上書き
 ```
 
@@ -207,9 +215,10 @@ curl http://localhost:50021/version
 | `STACKCHAN_TTS` | `piper` | TTS エンジン（`piper` or `voicevox`） |
 | `STACKCHAN_PORT` | （自動検出） | USB シリアルポート（複数 ESP32 デバイスを接続している場合に明示指定） |
 | `STACKCHAN_IP` | `192.168.1.100` | WiFi モード時の IP アドレス |
+| `XANGI_URL` | `http://127.0.0.1:18888` | `xangi-bridge` 用の接続先ベース URL |
 | `PIPER_BIN` | `tools/piper`（自動検出） | piper バイナリのパス |
 | `PIPER_MODEL` | `models/*.onnx`（自動検出） | piper モデルファイル（.onnx）のパス |
-| `PIPER_PLUS_VERSION` | `v1.11.0` | `setup_piper.sh` がDLする piper-plus のバージョン |
+| `PIPER_PLUS_VERSION` | `v1.12.0` | `setup_piper.sh` がDLする piper-plus のバージョン |
 | `FORCE` | `0` | `setup_piper.sh` で既存ファイルを強制再ダウンロード |
 
 ### WiFi 設定（オプション）
@@ -222,7 +231,7 @@ WiFi を使いたい場合はシリアルコマンドまたは PC ツールで�
 WIFI:MySSID:MyPassword
 
 # PC ツール
-uv run stackchan_atama.py wifi --ssid MySSID --password MyPassword
+uv run tools/stackchan_atama.py wifi-config --ssid MySSID --password MyPassword
 ```
 
 認証情報は NVS（不揮発メモリ）に保存され、再起動後も自動接続します。消去したい場合は `WIFI:CLEAR` を送信。
@@ -235,7 +244,7 @@ CoreS3 に GC0308 カメラユニットを接続すると、画像キャプチ�
 
 ```bash
 # シリアル経由
-uv run stackchan_atama.py capture -o photo.jpg
+uv run tools/stackchan_atama.py capture -o photo.jpg
 
 # HTTP 経由（WiFi 接続時）
 curl -o photo.jpg http://<CoreS3のIP>/capture
@@ -243,13 +252,39 @@ curl -o photo.jpg http://<CoreS3のIP>/capture
 
 解像度は QVGA (320x240)。Vision API に送る用途に十分な画質です。
 
+## xangi 連携
+
+`xangi-bridge` サブコマンドは `xangi-pet` と同じ pull 型 SSE を使って xangi の `GET /api/events/stream` を購読し、`turn.complete` の最終テキストを stackchan-atama に喋らせます。
+
+```bash
+# 既定: XANGI_URL=http://127.0.0.1:18888
+uv run tools/stackchan_atama.py xangi-bridge --pipeline
+
+# 特定インスタンスやスレッドだけに絞る
+uv run tools/stackchan_atama.py xangi-bridge \
+  --xangi-url http://xangi-a.local:18888 \
+  --instance-id xangi-a \
+  --thread-id discord:1478428157932605480 \
+  --pipeline
+```
+
+挙動:
+- `turn.started` で `doubt`
+- `message.delta` 到着後に `happy`
+- `turn.complete` で最終テキストを発話して `neutral`
+- `agent.error` で `sad`
+
+必要なら `--face-idle` / `--face-thinking` / `--face-talking` / `--face-error` で変更できる。
+
 ## トラブルシューティング
 
 - **Permission denied（Linux）**: `sudo usermod -aG dialout $USER` して再ログイン
 - **ポートが見つからない**: USBケーブルがデータ転送対応か確認（充電専用ケーブルはNG）
 - **間違ったポートが選ばれる（複数ESP32接続時）**: `STACKCHAN_PORT=/dev/cu.usbmodem3101 ...` で明示指定。自動検出は Espressif 純正 USB CDC（VID 0x303A）を優先するが、CH340/CP210x 系の他デバイスが繋がっていると振り分けが必要
 - **VOICEVOX接続エラー**: `docker ps` でコンテナ起動確認、または `curl http://localhost:50021/version` で疎通確認
-- **音が鳴らない**: `uv run stackchan_atama.py volume 255` で最大音量に設定
+- **音が鳴らない**: `uv run tools/stackchan_atama.py volume 255` で最大音量に設定
+- **発話開始が遅い**: `--pipeline` を使う。`xangi-bridge` では piper-plus を JSONL 入力の常駐プロセスとして保持し、初回だけモデルロードする。2回目以降のTTSはロードなしで低遅延になる
+- **piper-plus の発話速度を変えたい**: `PIPER_LENGTH_SCALE=1.2` のように小さくすると速くなる（既定はモデルカード推奨の `1.5`）。ただし発音品質とのトレードオフ
 - **シリアルポートが掴まれている**: `lsof /dev/ttyACM0` で確認、`fuser -k /dev/ttyACM0` で解放
 - **シリアルでWAV転送が失敗する**: `--serial-chunk 256 --serial-delay 0.02` で転送速度を落とす
 - **`setup_piper.sh` がmacOSで「開発元未確認」**: スクリプトが `xattr -dr com.apple.quarantine` を自動実行するが、それ以前に手動で `_piper/` 内のバイナリを開いてしまうと Gatekeeper にゴミ箱送りされる。`FORCE=1 tools/setup_piper.sh` で再DL
