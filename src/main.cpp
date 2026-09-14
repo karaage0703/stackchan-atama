@@ -462,6 +462,8 @@ void handleSerialCommand(const String& cmd) {
 
 // ---- Camera Setup (CoreS3 only) ----
 #if defined(ENABLE_CAMERA)
+static constexpr int CAMERA_FB_COUNT = 2;
+
 bool setupCamera() {
   // Release M5Unified's internal I2C so esp_camera can use GPIO 11/12
   M5.In_I2C.release();
@@ -490,7 +492,7 @@ bool setupCamera() {
   config.pixel_format = PIXFORMAT_RGB565;
   config.frame_size   = FRAMESIZE_QVGA;  // 320x240
   config.jpeg_quality = 12;
-  config.fb_count     = 2;
+  config.fb_count     = CAMERA_FB_COUNT;
   config.fb_location  = CAMERA_FB_IN_PSRAM;
   config.grab_mode    = CAMERA_GRAB_WHEN_EMPTY;
   config.sccb_i2c_port = -1;  // Let esp_camera manage I2C
@@ -512,13 +514,24 @@ bool setupCamera() {
   return true;
 }
 
+// With CAMERA_GRAB_WHEN_EMPTY the driver returns the oldest queued frame, which is
+// CAMERA_FB_COUNT captures stale for an occasional caller. Drain the queue first.
+static camera_fb_t* cameraFreshFrame() {
+  for (int i = 0; i < CAMERA_FB_COUNT; i++) {
+    camera_fb_t* stale = esp_camera_fb_get();
+    if (!stale) return NULL;
+    esp_camera_fb_return(stale);
+  }
+  return esp_camera_fb_get();
+}
+
 void handleCapture() {
   if (!camera_initialized) {
     Serial.println("{\"status\":\"error\",\"error\":\"camera not available\"}");
     return;
   }
 
-  camera_fb_t* fb = esp_camera_fb_get();
+  camera_fb_t* fb = cameraFreshFrame();
   if (!fb) {
     Serial.println("{\"status\":\"error\",\"error\":\"capture failed\"}");
     return;
@@ -574,7 +587,7 @@ void handleCaptureHTTP(AsyncWebServerRequest *request) {
     return;
   }
 
-  camera_fb_t* fb = esp_camera_fb_get();
+  camera_fb_t* fb = cameraFreshFrame();
   if (!fb) {
     request->send(500, "application/json", "{\"error\":\"capture failed\"}");
     return;
