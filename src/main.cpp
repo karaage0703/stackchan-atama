@@ -822,6 +822,9 @@ void loop() {
       if (serial_cmd_buf.length() > 0) {
         handleSerialCommand(serial_cmd_buf);
         serial_cmd_buf = "";
+        // HWCDC writes are buffered; without this a reply can sit in the buffer
+        // and be read by the host as the answer to its next command.
+        Serial.flush();
       }
     } else {
       serial_cmd_buf += c;
